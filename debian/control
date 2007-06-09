@@ -1,0 +1,19 @@
+Source: s3cmd
+Section: admin
+Priority: optional
+Maintainer: Mikhail Gusarov <dottedmag@dottedmag.net>
+Build-Depends: debhelper (>= 5.0.38)
+Build-Depends-Indep: python-central (>= 0.5.6), python-all-dev (>= 2.3.5-11)
+Standards-Version: 3.7.2
+XS-Python-Version: all
+
+Package: s3cmd
+Architecture: all
+Depends: ${python:Depends}, python-elementtree
+Provides: ${python:Provides}
+XB-Python-Version: ${python:Versions}
+Description: command-line Amazon S3 client
+ Command-line tool to upload, retrieve and manage data in Amazon S3 service
+ (http://www.amazon.com/s3/), designed for use in scripts.
+ .
+   Homepage: http://s3tools.logix.cz/s3cmd

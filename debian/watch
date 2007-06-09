@@ -1,0 +1,3 @@
+version=3
+
+http://sf.net/s3tools/s3cmd-(.*)\.tar\.gz

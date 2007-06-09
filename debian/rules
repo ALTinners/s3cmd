@@ -1,0 +1,43 @@
+#!/usr/bin/make -f
+# -*- makefile -*-
+
+PACKAGE_NAME=s3cmd
+
+build:
+
+clean:
+	dh_testdir
+	dh_testroot
+
+	PYTHONPATH=$(CURDIR) python debian/setup.py clean
+	-rm -f build-stamp
+	-rm -f S3/*.pyc
+
+	dh_clean
+
+install: build
+	dh_testdir
+	dh_testroot
+	dh_clean -k
+
+	PYTHONPATH=$(CURDUR) python debian/setup.py install --no-compile --root $(CURDIR)/debian/$(PACKAGE_NAME)
+	rm -rf debian/$(PACKAGE_NAME)/usr/lib/python*/site-packages/*.egg-info
+
+binary-indep: build install
+	dh_testdir
+	dh_testroot
+	dh_installchangelogs NEWS
+	dh_installdocs
+	dh_installman
+	dh_pycentral
+	dh_compress -X.py
+	dh_fixperms
+	dh_installdeb
+	dh_gencontrol
+	dh_md5sums
+	dh_builddeb
+
+binary-arch: build install
+
+binary: binary-indep binary-arch
+.PHONY: build clean binary-indep binary-arch binary install
