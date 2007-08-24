@@ -1,15 +1,22 @@
 #!/usr/bin/make -f
 # -*- makefile -*-
 
+include /usr/share/quilt/quilt.make
+
 PACKAGE_NAME=s3cmd
 
-build:
+configure: configure-stamp
+configure-stamp: patch
+	dh_testdir
+	touch $@
 
-clean:
+build: configure
+
+clean: patch
 	dh_testdir
 	dh_testroot
 
-	PYTHONPATH=$(CURDIR) python debian/setup.py clean
+	S3CMD_PACKAGING=1 python setup.py clean
 	-rm -f build-stamp
 	-rm -f S3/*.pyc
 
@@ -20,7 +27,7 @@ install: build
 	dh_testroot
 	dh_clean -k
 
-	PYTHONPATH=$(CURDUR) python debian/setup.py install --no-compile --root $(CURDIR)/debian/$(PACKAGE_NAME)
+	S3CMD_PACKAGING=1 python setup.py install --no-compile --root $(CURDIR)/debian/$(PACKAGE_NAME)
 	rm -rf debian/$(PACKAGE_NAME)/usr/lib/python*/site-packages/*.egg-info
 
 binary-indep: build install

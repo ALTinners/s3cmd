@@ -1,3 +1,14 @@
+s3cmd (0.9.4-1) unstable; urgency=low
+
+  * New upstream release (Closes: #438933).
+  * Do not build for python2.3 as suggested by author (Closes: #432705).
+  * No longer ship s3cmd.1 or setup.py in debian/ - upstream ones are ok.
+  * Quilt is used to manage patches.
+    - do-not-check-elementtree-at-build-time.patch added - ElementTree is
+      only runtime dependency, no need to check it at build time.
+
+ -- Mikhail Gusarov <dottedmag@dottedmag.net>  Fri, 24 Aug 2007 23:17:27 +0700
+
 s3cmd (0.9.3-1) unstable; urgency=low
 
   * Initial revision. (Closes: #427414)
