@@ -1,3 +1,12 @@
+s3cmd (0.9.5-1) unstable; urgency=low
+
+  * New upstream release
+    - do-not-check-elementtree-at-build-time.patch refreshed.
+  
+  * Homepage moved from description to debian/control field.
+
+ -- Mikhail Gusarov <dottedmag@dottedmag.net>  Wed, 14 Nov 2007 03:04:49 +0600
+
 s3cmd (0.9.4-1) unstable; urgency=low
 
   * New upstream release (Closes: #438933).
