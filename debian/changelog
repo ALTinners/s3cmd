@@ -1,3 +1,12 @@
+s3cmd (0.9.6-1) unstable; urgency=low
+
+  * New upstream release (Closes: #471698).
+  * Bumped Standards-Version (no changes required).
+  * Bumped python-central dependency to >= 0.6 to get rid of empty
+    /usr/lib directory.
+
+ -- Mikhail Gusarov <dottedmag@dottedmag.net>  Mon, 31 Mar 2008 23:52:49 +0700
+
 s3cmd (0.9.5-1) unstable; urgency=low
 
   * New upstream release
