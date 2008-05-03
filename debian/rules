@@ -5,24 +5,24 @@ include /usr/share/quilt/quilt.make
 
 PACKAGE_NAME=s3cmd
 
-configure: configure-stamp
-configure-stamp: patch
-	dh_testdir
-	touch $@
-
-build: configure
-
-clean: patch
+clean: clean-patched unpatch
 	dh_testdir
 	dh_testroot
 
-	S3CMD_PACKAGING=1 python setup.py clean
-	-rm -f build-stamp
 	-rm -f S3/*.pyc
 
 	dh_clean
 
-install: build
+#
+# We have to run patched setup.py, as it checks for the elementtree
+#
+clean-patched: patch
+	dh_testdir
+	dh_testroot
+
+	S3CMD_PACKAGING=1 python setup.py clean
+
+install: patch
 	dh_testdir
 	dh_testroot
 	dh_clean -k
@@ -30,7 +30,7 @@ install: build
 	S3CMD_PACKAGING=1 python setup.py install --no-compile --root $(CURDIR)/debian/$(PACKAGE_NAME)
 	rm -rf debian/$(PACKAGE_NAME)/usr/lib/python*/site-packages/*.egg-info
 
-binary-indep: build install
+binary-indep: install
 	dh_testdir
 	dh_testroot
 	dh_installchangelogs NEWS
@@ -44,7 +44,7 @@ binary-indep: build install
 	dh_md5sums
 	dh_builddeb
 
-binary-arch: build install
+binary-arch: install
 
 binary: binary-indep binary-arch
 .PHONY: build clean binary-indep binary-arch binary install

@@ -15,6 +15,7 @@ class Config(object):
 	secret_key = ""
 	host_base = "s3.amazonaws.com"
 	host_bucket = "%(bucket)s.s3.amazonaws.com"
+	simpledb_host = "sdb.amazonaws.com"
 	verbosity = logging.WARNING
 	send_chunk = 4096
 	recv_chunk = 4096
@@ -28,9 +29,10 @@ class Config(object):
 	preserve_attrs = True
 	preserve_attrs_list = [ 
 		'uname',	# Verbose owner Name (e.g. 'root')
-		#'uid',		# Numeric user ID (e.g. 0)
+		'uid',		# Numeric user ID (e.g. 0)
 		'gname',	# Group name (e.g. 'users')
-		#'gid',		# Numeric group ID (e.g. 100)
+		'gid',		# Numeric group ID (e.g. 100)
+		'atime',	# Last access timestamp
 		'mtime',	# Modification timestamp
 		'ctime',	# Creation timestamp
 		'mode',		# File mode (e.g. rwxr-xr-x = 755)
@@ -46,6 +48,11 @@ class Config(object):
 	bucket_location = "US"
 	default_mime_type = "binary/octet-stream"
 	guess_mime_type = False
+	debug_syncmatch = False
+	# List of compiled REGEXPs
+	exclude = []
+	# Dict mapping compiled REGEXPs back to their textual form
+	debug_exclude = {}
 
 	## Creating a singleton
 	def __new__(self, configfile = None):

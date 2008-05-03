@@ -1,17 +1,19 @@
 Source: s3cmd
-Section: admin
+Section: utils
 Priority: optional
 Maintainer: Mikhail Gusarov <dottedmag@dottedmag.net>
-Build-Depends: debhelper (>= 5.0.38), quilt (>= 0.40), python-all-dev (>= 2.3.5-11)
+Uploaders: Python Applications Packaging Team <python-apps-team@lists.alioth.debian.org>
+Build-Depends: debhelper (>= 7), quilt (>= 0.40), python-all-dev (>= 2.3.5-11)
 Build-Depends-Indep: python-central (>= 0.6)
-Standards-Version: 3.7.3
-Homepage: http://s3tools.logix.cz/s3cmd
+Standards-Version: 3.8.0
 XS-Python-Version: >=2.4
+Vcs-Svn: svn://svn.debian.org/svn/python-apps/packages/s3cmd/trunk
+Vcs-Browser: http://svn.debian.org/wsvn/python-apps/packages/s3cmd/trunk/
+Homepage: http://s3tools.logix.cz/s3cmd
 
 Package: s3cmd
 Architecture: all
-Depends: ${python:Depends}, python-elementtree
-Provides: ${python:Provides}
+Depends: python (>= 2.5) | python-elementtree, ${python:Depends}
 XB-Python-Version: ${python:Versions}
 Description: command-line Amazon S3 client
  Command-line tool to upload, retrieve and manage data in Amazon S3 service

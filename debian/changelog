@@ -1,3 +1,22 @@
+s3cmd (0.9.8.1-1) unstable; urgency=low
+
+  * New upstream release.
+  * Package is now maintained in PAPT:
+    - PAPT added to Uploaders.
+  * debian/rules cleaned up:
+    - no need to have empty configure target
+    - fixed quilt usage
+  * debhelper compatibility level bumped to 7:
+    - bumped debhelper build-dependency.
+  * Section changed to utils.
+  * python-elementtree dependency changed to python2.5 |
+    python-elementtree to use ElementTree bundled in 2.5
+  * Vcs-{Svn,Browser} added.
+  * Standards-Version bumped to 3.8.0:
+    - debian/README.source added
+
+ -- Mikhail Gusarov <dottedmag@dottedmag.net>  Sat, 03 May 2008 14:30:29 +0700
+
 s3cmd (0.9.6-1) unstable; urgency=low
 
   * New upstream release (Closes: #471698).

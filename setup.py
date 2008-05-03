@@ -9,19 +9,19 @@ if float("%d.%d" % sys.version_info[:2]) < 2.4:
 	sys.stderr.write("S3cmd requires Python 2.4 or newer.\n")
 	sys.exit(1)
 
-#try:
-#	import xml.etree.ElementTree as ET
-#	print "Using xml.etree.ElementTree for XML processing"
-#except ImportError, e:
-#	sys.stderr.write(str(e) + "\n")
-#	try:
-#		import elementtree.ElementTree as ET
-#		print "Using elementtree.ElementTree for XML processing"
-#	except ImportError, e:
-#		sys.stderr.write(str(e) + "\n")
-#		sys.stderr.write("Please install ElementTree module from\n")
-#		sys.stderr.write("http://effbot.org/zone/element-index.htm\n")
-#		sys.exit(1)
+try:
+	import xml.etree.ElementTree as ET
+	print "Using xml.etree.ElementTree for XML processing"
+except ImportError, e:
+	sys.stderr.write(str(e) + "\n")
+	try:
+		import elementtree.ElementTree as ET
+		print "Using elementtree.ElementTree for XML processing"
+	except ImportError, e:
+		sys.stderr.write(str(e) + "\n")
+		sys.stderr.write("Please install ElementTree module from\n")
+		sys.stderr.write("http://effbot.org/zone/element-index.htm\n")
+		sys.exit(1)
 
 try:
 	## Remove 'MANIFEST' file to force
