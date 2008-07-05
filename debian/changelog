@@ -1,3 +1,9 @@
+s3cmd (0.9.8.2-1) unstable; urgency=low
+
+  * New upstream release.
+
+ -- Mikhail Gusarov <dottedmag@dottedmag.net>  Sat, 05 Jul 2008 14:35:07 +0700
+
 s3cmd (0.9.8.1-1) unstable; urgency=low
 
   * New upstream release.
