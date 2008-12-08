@@ -8,7 +8,7 @@ Build-Depends-Indep: python-central (>= 0.6)
 Standards-Version: 3.8.0
 XS-Python-Version: >=2.4
 Vcs-Svn: svn://svn.debian.org/svn/python-apps/packages/s3cmd/trunk
-Vcs-Browser: http://svn.debian.org/wsvn/python-apps/packages/s3cmd/trunk/
+Vcs-Browser: http://svn.debian.org/viewsvn/python-apps/packages/s3cmd/trunk/
 Homepage: http://s3tools.logix.cz/s3cmd
 
 Package: s3cmd

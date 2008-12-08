@@ -1,3 +1,7 @@
+Upstream checks for the presence of ElementTree at the build time. This is
+unnecessary (ET is only used run-time), but he prefers it this way, so let's
+just ignore this check.
+
 Index: s3cmd-0.9.5/setup.py
 ===================================================================
 --- s3cmd-0.9.5.orig/setup.py	2007-08-25 07:46:25.000000000 +0700

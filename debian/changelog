@@ -1,3 +1,14 @@
+s3cmd (0.9.8.4-1) unstable; urgency=low
+
+  [Mikhail Gusarov]
+  * New upstream release.
+
+  [Sandro Tosi]
+  * debian/control
+    - switch Vcs-Browser field to viewsvn
+  
+ -- Mikhail Gusarov <dottedmag@dottedmag.net>  Tue, 09 Dec 2008 01:56:19 +0600
+
 s3cmd (0.9.8.3-1) unstable; urgency=low
 
   * New upstream release.

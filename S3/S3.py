@@ -71,7 +71,7 @@ class S3(object):
 				return httplib.HTTPConnection(self.get_hostname(bucket))
 
 	def get_hostname(self, bucket):
-		if bucket:
+		if bucket and self.check_bucket_name_dns_conformity(bucket):
 			if self.redir_map.has_key(bucket):
 				host = self.redir_map[bucket]
 			else:
@@ -85,10 +85,12 @@ class S3(object):
 		self.redir_map[bucket] = redir_hostname
 
 	def format_uri(self, resource):
-		if self.config.proxy_host != "":
-			uri = "http://%s%s" % (self.get_hostname(resource['bucket']), resource['uri'])
+		if resource['bucket'] and not self.check_bucket_name_dns_conformity(resource['bucket']):
+			uri = "/%s%s" % (resource['bucket'], resource['uri'])
 		else:
 			uri = resource['uri']
+		if self.config.proxy_host != "":
+			uri = "http://%s%s" % (self.get_hostname(resource['bucket']), uri)
 		debug('format_uri(): ' + uri)
 		return uri
 
@@ -108,6 +110,7 @@ class S3(object):
 		def _get_contents(data):
 			return getListFromXml(data, "Contents")
 
+		prefix = self.urlencode_string(prefix)
 		request = self.create_request("BUCKET_LIST", bucket = bucket, prefix = prefix)
 		response = self.send_request(request)
 		#debug(response)
@@ -124,7 +127,6 @@ class S3(object):
 		return response
 
 	def bucket_create(self, bucket, bucket_location = None):
-		self.check_bucket_name(bucket)
 		headers = SortedDict()
 		body = ""
 		if bucket_location and bucket_location.strip().upper() != "US":
@@ -132,6 +134,9 @@ class S3(object):
 			body += bucket_location.strip().upper()
 			body += "</LocationConstraint></CreateBucketConfiguration>"
 			debug("bucket_location: " + body)
+			self.check_bucket_name(bucket, dns_strict = True)
+		else:
+			self.check_bucket_name(bucket, dns_strict = False)
 		headers["content-length"] = len(body)
 		if self.config.acl_public:
 			headers["x-amz-acl"] = "public-read"
@@ -152,12 +157,12 @@ class S3(object):
 
 	def object_put(self, filename, bucket, object, extra_headers = None):
 		if not os.path.isfile(filename):
-			raise ParameterError("%s is not a regular file" % filename)
+			raise InvalidFileError("%s is not a regular file" % filename)
 		try:
 			file = open(filename, "rb")
 			size = os.stat(filename)[ST_SIZE]
 		except IOError, e:
-			raise ParameterError("%s: %s" % (filename, e.strerror))
+			raise InvalidFileError("%s: %s" % (filename, e.strerror))
 		headers = SortedDict()
 		if extra_headers:
 			headers.update(extra_headers)
@@ -225,6 +230,8 @@ class S3(object):
 
 	## Low level methods
 	def urlencode_string(self, string):
+		if type(string) == unicode:
+			string = string.encode("utf-8")
 		encoded = ""
 		## List of characters that must be escaped for S3
 		## Haven't found this in any official docs
@@ -295,19 +302,26 @@ class S3(object):
 		debug("CreateRequest: resource[uri]=" + resource['uri'])
 		return (method_string, resource, headers)
 	
-	def send_request(self, request, body = None):
+	def send_request(self, request, body = None, retries = 5):
 		method_string, resource, headers = request
 		info("Processing request, please wait...")
- 		conn = self.get_connection(resource['bucket'])
- 		conn.request(method_string, self.format_uri(resource), body, headers)
-		response = {}
-		http_response = conn.getresponse()
-		response["status"] = http_response.status
-		response["reason"] = http_response.reason
-		response["headers"] = convertTupleListToDict(http_response.getheaders())
-		response["data"] =  http_response.read()
-		debug("Response: " + str(response))
-		conn.close()
+		try:
+			conn = self.get_connection(resource['bucket'])
+			conn.request(method_string, self.format_uri(resource), body, headers)
+			response = {}
+			http_response = conn.getresponse()
+			response["status"] = http_response.status
+			response["reason"] = http_response.reason
+			response["headers"] = convertTupleListToDict(http_response.getheaders())
+			response["data"] =  http_response.read()
+			debug("Response: " + str(response))
+			conn.close()
+		except Exception, e:
+			if retries:
+				warning("Retrying failed request: %s (%s)" % (resource['uri'], e))
+				return self.send_request(request, body, retries - 1)
+			else:
+				raise S3RequestError("Request failed for: %s" % resource['uri'])
 
 		if response["status"] == 307:
 			## RedirectPermanent
@@ -317,8 +331,18 @@ class S3(object):
 			info("Redirected to: %s" % (redir_hostname))
 			return self.send_request(request, body)
 
+		if response["status"] >= 500:
+			e = S3Error(response)
+			if retries:
+				warning(u"Retrying failed request: %s" % resource['uri'])
+				warning(unicode(e))
+				return self.send_request(request, body, retries - 1)
+			else:
+				raise e
+
 		if response["status"] < 200 or response["status"] > 299:
 			raise S3Error(response)
+
 		return response
 
 	def send_file(self, request, file, throttle = 0, retries = 3):
@@ -356,7 +380,7 @@ class S3(object):
 			size_left -= len(data)
 			if throttle:
 				time.sleep(throttle)
-			info("Sent %d bytes (%d %% of %d)" % (
+			debug("Sent %d bytes (%d %% of %d)" % (
 				(size_total - size_left),
 				(size_total - size_left) * 100 / size_total,
 				size_total))
@@ -370,7 +394,7 @@ class S3(object):
 		response["data"] = http_response.read()
 		response["elapsed"] = timestamp_end - timestamp_start
 		response["size"] = size_total
-		response["speed"] = float(response["size"]) / response["elapsed"]
+		response["speed"] = response["elapsed"] and float(response["size"]) / response["elapsed"] or float(-1)
 		conn.close()
 
 		if response["status"] == 307:
@@ -439,7 +463,7 @@ class S3(object):
 			stream.write(data)
 			md5_hash.update(data)
 			size_recvd += len(data)
-			info("Received %d bytes (%d %% of %d)" % (
+			debug("Received %d bytes (%d %% of %d)" % (
 				size_recvd,
 				size_recvd * 100 / size_total,
 				size_total))
@@ -449,7 +473,7 @@ class S3(object):
 		response["md5match"] = response["headers"]["etag"].find(response["md5"]) >= 0
 		response["elapsed"] = timestamp_end - timestamp_start
 		response["size"] = size_recvd
-		response["speed"] = float(response["size"]) / response["elapsed"]
+		response["speed"] = response["elapsed"] and float(response["size"]) / response["elapsed"] or float(-1)
 		if response["size"] != long(response["headers"]["content-length"]):
 			warning("Reported size (%s) does not match received size (%s)" % (
 				response["headers"]["content-length"], response["size"]))
@@ -473,13 +497,37 @@ class S3(object):
 		debug("SignHeaders: " + repr(h))
 		return base64.encodestring(hmac.new(self.config.secret_key, h, sha).digest()).strip()
 
-	def check_bucket_name(self, bucket):
-		invalid = re.compile("([^a-z0-9\._-])").search(bucket)
-		if invalid:
-			raise ParameterError("Bucket name '%s' contains disallowed character '%s'. The only supported ones are: lowercase us-ascii letters (a-z), digits (0-9), dot (.), hyphen (-) and underscore (_)." % (bucket, invalid.groups()[0]))
+	@staticmethod
+	def check_bucket_name(bucket, dns_strict = True):
+		if dns_strict:
+			invalid = re.search("([^a-z0-9\.-])", bucket)
+			if invalid:
+				raise ParameterError("Bucket name '%s' contains disallowed character '%s'. The only supported ones are: lowercase us-ascii letters (a-z), digits (0-9), dot (.) and hyphen (-)." % (bucket, invalid.groups()[0]))
+		else:
+			invalid = re.search("([^A-Za-z0-9\._-])", bucket)
+			if invalid:
+				raise ParameterError("Bucket name '%s' contains disallowed character '%s'. The only supported ones are: us-ascii letters (a-z, A-Z), digits (0-9), dot (.), hyphen (-) and underscore (_)." % (bucket, invalid.groups()[0]))
+
 		if len(bucket) < 3:
 			raise ParameterError("Bucket name '%s' is too short (min 3 characters)" % bucket)
 		if len(bucket) > 255:
 			raise ParameterError("Bucket name '%s' is too long (max 255 characters)" % bucket)
+		if dns_strict:
+			if len(bucket) > 63:
+				raise ParameterError("Bucket name '%s' is too long (max 63 characters)" % bucket)
+			if re.search("-\.", bucket):
+				raise ParameterError("Bucket name '%s' must not contain sequence '-.' for DNS compatibility" % bucket)
+			if re.search("\.\.", bucket):
+				raise ParameterError("Bucket name '%s' must not contain sequence '..' for DNS compatibility" % bucket)
+			if not re.search("^[0-9a-z]", bucket):
+				raise ParameterError("Bucket name '%s' must start with a letter or a digit" % bucket)
+			if not re.search("[0-9a-z]$", bucket):
+				raise ParameterError("Bucket name '%s' must end with a letter or a digit" % bucket)
 		return True
 
+	@staticmethod
+	def check_bucket_name_dns_conformity(bucket):
+		try:
+			return S3.check_bucket_name(bucket, dns_strict = True)
+		except ParameterError:
+			return False
