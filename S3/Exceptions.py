@@ -3,6 +3,7 @@
 ##         http://www.logix.cz/michal
 ## License: GPL Version 2
 
+from Utils import getTreeFromXml, unicodise, deunicodise
 from logging import debug, info, warning, error
 
 try:
@@ -11,12 +12,24 @@ except ImportError:
 	import elementtree.ElementTree as ET
 
 class S3Exception(Exception):
+	def __init__(self, message = ""):
+		self.message = unicodise(message)
+
 	def __str__(self):
-		## Is this legal?
-		return unicode(self)
+		## Call unicode(self) instead of self.message because
+		## __unicode__() method could be overriden in subclasses!
+		return deunicodise(unicode(self))
 
 	def __unicode__(self):
 		return self.message
+
+	## (Base)Exception.message has been deprecated in Python 2.6
+	def _get_message(self):
+		return self._message
+	def _set_message(self, message):
+		self._message = message
+	message = property(_get_message, _set_message)
+
 
 class S3Error (S3Exception):
 	def __init__(self, response):
@@ -28,20 +41,25 @@ class S3Error (S3Exception):
 			for header in response["headers"]:
 				debug("HttpHeader: %s: %s" % (header, response["headers"][header]))
 		if response.has_key("data"):
-			tree = ET.fromstring(response["data"])
-			for child in tree.getchildren():
+			tree = getTreeFromXml(response["data"])
+			error_node = tree
+			if not error_node.tag == "Error":
+				error_node = tree.find(".//Error")
+			for child in error_node.getchildren():
 				if child.text != "":
 					debug("ErrorXML: " + child.tag + ": " + repr(child.text))
 					self.info[child.tag] = child.text
 
 	def __unicode__(self):
-		retval = "%d (%s)" % (self.status, self.reason)
-		try:
-			retval += (": %s" % self.info["Code"])
-		except (AttributeError, KeyError):
-			pass
+		retval = u"%d " % (self.status)
+		retval += (u"(%s)" % (self.info.has_key("Code") and self.info["Code"] or self.reason))
+		if self.info.has_key("Message"):
+			retval += (u": %s" % self.info["Message"])
 		return retval
 
+class CloudFrontError(S3Error):
+	pass
+		
 class S3UploadError(S3Exception):
 	pass
 

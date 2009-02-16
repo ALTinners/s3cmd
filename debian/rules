@@ -25,7 +25,7 @@ clean-patched: patch
 install: patch
 	dh_testdir
 	dh_testroot
-	dh_clean -k
+	dh_prep
 
 	S3CMD_PACKAGING=1 python setup.py install --no-compile --root $(CURDIR)/debian/$(PACKAGE_NAME)
 	rm -rf debian/$(PACKAGE_NAME)/usr/lib/python*/site-packages/*.egg-info

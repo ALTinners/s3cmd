@@ -1,3 +1,19 @@
+s3cmd (0.9.9~rc3-1) unstable; urgency=low
+
+  [ Mikhail Gusarov ]
+  * New upstream release.
+  * debian/watch:
+    - 0.9.9-rc3-speedup tarball should not be considered.
+  * debian/control:
+    - package description expanded, as suggested by Lintian.
+  * debian/rules:
+    - deprecated dh_clean -k replaced with dh_prep.
+
+  [ Piotr Ożarowski ]
+  * debian/watch file updated to handle -rc and -pre versions correctly
+
+ -- Mikhail Gusarov <dottedmag@dottedmag.net>  Tue, 17 Feb 2009 01:27:27 +0600
+
 s3cmd (0.9.8.4-1) unstable; urgency=low
 
   [Mikhail Gusarov]

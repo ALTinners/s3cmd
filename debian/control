@@ -17,4 +17,12 @@ Depends: python (>= 2.5) | python-elementtree, ${python:Depends}
 XB-Python-Version: ${python:Versions}
 Description: command-line Amazon S3 client
  Command-line tool to upload, retrieve and manage data in Amazon S3 service
- (http://www.amazon.com/s3/), designed for use in scripts.
+ (http://www.amazon.com/s3/), designed for use in scripts. Features:
+  - creating and destroying S3 buckets
+  - uploading and downloading files
+  - listing remote files
+  - removing remote files
+  - synchronizing local directories to S3 buckets
+  - getting various information about buckets and disk usage
+ .
+ s3cmd supports both (US and EU) S3 datacentres.
