@@ -1,3 +1,17 @@
+s3cmd (0.9.9-2) unstable; urgency=low
+
+  * Switched to debian-support.
+    - added preinst script to de-register from pycentral.
+  * Standards-Version bumped to 3.8.1, no changes needed.
+  * Private python modules were moved to /usr/share/s3cmd:
+    - debian/s3cmd.dirs
+    - debian/rules changed accordingly
+  * debian/rules cleanup
+  * python-all-dev build-dependency relaxed to python, as no binary
+    modules are built.
+
+ -- Mikhail Gusarov <dottedmag@dottedmag.net>  Mon, 13 Apr 2009 05:08:02 +0700
+
 s3cmd (0.9.9-1) unstable; urgency=low
 
   * New upstream release.
