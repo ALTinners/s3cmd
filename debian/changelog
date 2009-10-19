@@ -1,6 +1,17 @@
+s3cmd (0.9.9.91-1) unstable; urgency=low
+
+  * New upstream release.
+  * Bump Standards-Version, no changes required.
+  * Drop XS-Python-Version: Debian does not have Python < 2.4 anymore.
+  * Drop unused XB-Python-Version.
+  * Fix preinst script: it errorneously contained 0.14-1 as a first
+    python-support-managed version, not 0.9.9-2.
+
+ -- Mikhail Gusarov <dottedmag@dottedmag.net>  Tue, 20 Oct 2009 01:53:35 +0700
+
 s3cmd (0.9.9-2) unstable; urgency=low
 
-  * Switched to debian-support.
+  * Switched to python-support.
     - added preinst script to de-register from pycentral.
   * Standards-Version bumped to 3.8.1, no changes needed.
   * Private python modules were moved to /usr/share/s3cmd:
