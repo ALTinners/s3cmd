@@ -3,9 +3,9 @@ Section: utils
 Priority: optional
 Maintainer: Mikhail Gusarov <dottedmag@dottedmag.net>
 Uploaders: Python Applications Packaging Team <python-apps-team@lists.alioth.debian.org>
-Build-Depends: debhelper (>= 7), quilt (>= 0.40), python
+Build-Depends: debhelper (>= 7), python
 Build-Depends-Indep: python-support (>= 0.6.4)
-Standards-Version: 3.8.3
+Standards-Version: 3.9.1
 Vcs-Svn: svn://svn.debian.org/svn/python-apps/packages/s3cmd/trunk
 Vcs-Browser: http://svn.debian.org/viewsvn/python-apps/packages/s3cmd/trunk/
 Homepage: http://s3tools.logix.cz/s3cmd

@@ -1,5 +1,0 @@
-This package uses quilt packaging system, and patches may be (de)applied by
-using (un)patch debian/rules targets.
-
-S3CMD_PACKAGING quirk disables installing documentation and manpages by means of
-upstream setup.py - upstream likes it this way.

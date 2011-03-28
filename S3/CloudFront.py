@@ -15,7 +15,7 @@ except ImportError:
 
 from Config import Config
 from Exceptions import *
-from Utils import getTreeFromXml, appendXmlTextNode, getDictFromTree, dateS3toPython, sign_string
+from Utils import getTreeFromXml, appendXmlTextNode, getDictFromTree, dateS3toPython, sign_string, getBucketFromHostname, getHostnameFromBucket
 from S3Uri import S3Uri, S3UriS3
 
 def output(message):
@@ -53,7 +53,7 @@ class DistributionSummary(object):
 class DistributionList(object):
 	## Example:
 	## 
-	## <DistributionList xmlns="http://cloudfront.amazonaws.com/doc/2008-06-30/">
+	## <DistributionList xmlns="http://cloudfront.amazonaws.com/doc/2010-07-15/">
 	##	<Marker />
 	##	<MaxItems>100</MaxItems>
 	##	<IsTruncated>false</IsTruncated>
@@ -80,7 +80,7 @@ class DistributionList(object):
 class Distribution(object):
 	## Example:
 	##
-	## <Distribution xmlns="http://cloudfront.amazonaws.com/doc/2008-06-30/">
+	## <Distribution xmlns="http://cloudfront.amazonaws.com/doc/2010-07-15/">
 	##	<Id>1234567890ABC</Id>
 	##	<Status>InProgress</Status>
 	##	<LastModifiedTime>2009-01-16T13:07:11.319Z</LastModifiedTime>
@@ -114,10 +114,14 @@ class DistributionConfig(object):
 	##	<CallerReference>s3://somebucket/</CallerReference>
 	##	<Comment>http://somebucket.s3.amazonaws.com/</Comment>
 	##	<Enabled>true</Enabled>
+	##  <Logging>
+	##    <Bucket>bu.ck.et</Bucket>
+	##    <Prefix>/cf-somebucket/</Prefix>
+	##  </Logging>
 	## </DistributionConfig>
 
 	EMPTY_CONFIG = "<DistributionConfig><Origin/><CallerReference/><Enabled>true</Enabled></DistributionConfig>"
-	xmlns = "http://cloudfront.amazonaws.com/doc/2008-06-30/"
+	xmlns = "http://cloudfront.amazonaws.com/doc/2010-07-15/"
 	def __init__(self, xml = None, tree = None):
 		if not xml:
 			xml = DistributionConfig.EMPTY_CONFIG
@@ -139,6 +143,18 @@ class DistributionConfig(object):
 		self.info['CNAME'] = [cname.lower() for cname in self.info['CNAME']]
 		if not self.info.has_key("Comment"):
 			self.info['Comment'] = ""
+		if not self.info.has_key("DefaultRootObject"):
+			self.info['DefaultRootObject'] = ""
+		## Figure out logging - complex node not parsed by getDictFromTree()
+		logging_nodes = tree.findall(".//Logging")
+		if logging_nodes:
+			logging_dict = getDictFromTree(logging_nodes[0])
+			logging_dict['Bucket'], success = getBucketFromHostname(logging_dict['Bucket'])
+			if not success:
+				warning("Logging to unparsable bucket name: %s" % logging_dict['Bucket'])
+			self.info['Logging'] = S3UriS3("s3://%(Bucket)s/%(Prefix)s" % logging_dict)
+		else:
+			self.info['Logging'] = None
 
 	def __str__(self):
 		tree = ET.Element("DistributionConfig")
@@ -152,7 +168,14 @@ class DistributionConfig(object):
 		if self.info['Comment']:
 			appendXmlTextNode("Comment", self.info['Comment'], tree)
 		appendXmlTextNode("Enabled", str(self.info['Enabled']).lower(), tree)
-
+		# don't create a empty DefaultRootObject element as it would result in a MalformedXML error
+		if str(self.info['DefaultRootObject']):
+			appendXmlTextNode("DefaultRootObject", str(self.info['DefaultRootObject']), tree)
+		if self.info['Logging']:
+			logging_el = ET.Element("Logging")
+			appendXmlTextNode("Bucket", getHostnameFromBucket(self.info['Logging'].bucket()), logging_el)
+			appendXmlTextNode("Prefix", self.info['Logging'].object(), logging_el)
+			tree.append(logging_el)
 		return ET.tostring(tree)
 
 class CloudFront(object):
@@ -183,11 +206,12 @@ class CloudFront(object):
 		## TODO: handle Truncated 
 		return response
 	
-	def CreateDistribution(self, uri, cnames_add = [], comment = None):
+	def CreateDistribution(self, uri, cnames_add = [], comment = None, logging = None, default_root_object = None):
 		dist_config = DistributionConfig()
 		dist_config.info['Enabled'] = True
 		dist_config.info['Origin'] = uri.host_name()
 		dist_config.info['CallerReference'] = str(uri)
+		dist_config.info['DefaultRootObject'] = default_root_object
 		if comment == None:
 			dist_config.info['Comment'] = uri.public_url()
 		else:
@@ -195,6 +219,8 @@ class CloudFront(object):
 		for cname in cnames_add:
 			if dist_config.info['CNAME'].count(cname) == 0:
 				dist_config.info['CNAME'].append(cname)
+		if logging:
+			dist_config.info['Logging'] = S3UriS3(logging)
 		request_body = str(dist_config)
 		debug("CreateDistribution(): request_body: %s" % request_body)
 		response = self.send_request("CreateDist", body = request_body)
@@ -202,7 +228,8 @@ class CloudFront(object):
 		return response
 	
 	def ModifyDistribution(self, cfuri, cnames_add = [], cnames_remove = [],
-	                       comment = None, enabled = None):
+	                       comment = None, enabled = None, logging = None,
+                           default_root_object = None):
 		if cfuri.type != "cf":
 			raise ValueError("Expected CFUri instead of: %s" % cfuri)
 		# Get current dist status (enabled/disabled) and Etag
@@ -213,12 +240,19 @@ class CloudFront(object):
 			dc.info['Enabled'] = enabled
 		if comment != None:
 			dc.info['Comment'] = comment
+		if default_root_object != None:
+			dc.info['DefaultRootObject'] = default_root_object
 		for cname in cnames_add:
 			if dc.info['CNAME'].count(cname) == 0:
 				dc.info['CNAME'].append(cname)
 		for cname in cnames_remove:
 			while dc.info['CNAME'].count(cname) > 0:
 				dc.info['CNAME'].remove(cname)
+		if logging != None:
+			if logging == False:
+				dc.info['Logging'] = False
+			else:
+				dc.info['Logging'] = S3UriS3(logging)
 		response = self.SetDistConfig(cfuri, dc, response['headers']['etag'])
 		return response
 		
@@ -364,6 +398,8 @@ class Cmd(object):
 		cf_cnames_remove = []
 		cf_comment = None
 		cf_enable = None
+		cf_logging = None
+		cf_default_root_object = None
 
 		def option_list(self):
 			return [opt for opt in dir(self) if opt.startswith("cf_")]
@@ -372,6 +408,36 @@ class Cmd(object):
 			setattr(Cmd.options, option, value)
 
 	options = Options()
+	dist_list = None
+
+	@staticmethod
+	def _get_dist_name_for_bucket(uri):
+		cf = CloudFront(Config())
+		debug("_get_dist_name_for_bucket(%r)" % uri)
+		assert(uri.type == "s3")
+		if Cmd.dist_list is None:
+			response = cf.GetList()
+			Cmd.dist_list = {}
+			for d in response['dist_list'].dist_summs:
+				Cmd.dist_list[getBucketFromHostname(d.info['Origin'])[0]] = d.uri()
+			debug("dist_list: %s" % Cmd.dist_list)
+		return Cmd.dist_list[uri.bucket()]
+
+	@staticmethod
+	def _parse_args(args):
+		cfuris = []
+		for arg in args:
+			uri = S3Uri(arg)
+			if uri.type == 's3':
+				try:
+					uri = Cmd._get_dist_name_for_bucket(uri)
+				except Exception, e:
+					debug(e)
+					raise ParameterError("Unable to translate S3 URI to CloudFront distribution name: %s" % uri)
+			if uri.type != 'cf':
+				raise ParameterError("CloudFront URI required instead of: %s" % arg)
+			cfuris.append(uri)
+		return cfuris
 
 	@staticmethod
 	def info(args):
@@ -386,11 +452,7 @@ class Cmd(object):
 				pretty_output("Enabled", d.info['Enabled'])
 				output("")
 		else:
-			cfuris = []
-			for arg in args:
-				cfuris.append(S3Uri(arg))
-				if cfuris[-1].type != 'cf':
-					raise ParameterError("CloudFront URI required instead of: %s" % arg)
+			cfuris = Cmd._parse_args(args)
 			for cfuri in cfuris:
 				response = cf.GetDistInfo(cfuri)
 				d = response['distribution']
@@ -402,6 +464,8 @@ class Cmd(object):
 				pretty_output("CNAMEs", ", ".join(dc.info['CNAME']))
 				pretty_output("Comment", dc.info['Comment'])
 				pretty_output("Enabled", dc.info['Enabled'])
+				pretty_output("DfltRootObject", dc.info['DefaultRootObject'])
+				pretty_output("Logging", dc.info['Logging'] or "Disabled")
 				pretty_output("Etag", response['headers']['etag'])
 
 	@staticmethod
@@ -422,7 +486,9 @@ class Cmd(object):
 		for uri in buckets:
 			info("Creating distribution from: %s" % uri)
 			response = cf.CreateDistribution(uri, cnames_add = Cmd.options.cf_cnames_add, 
-			                                 comment = Cmd.options.cf_comment)
+			                                 comment = Cmd.options.cf_comment,
+			                                 logging = Cmd.options.cf_logging,
+                                             default_root_object = Cmd.options.cf_default_root_object)
 			d = response['distribution']
 			dc = d.info['DistributionConfig']
 			output("Distribution created:")
@@ -433,16 +499,13 @@ class Cmd(object):
 			pretty_output("Comment", dc.info['Comment'])
 			pretty_output("Status", d.info['Status'])
 			pretty_output("Enabled", dc.info['Enabled'])
+			pretty_output("DefaultRootObject", dc.info['DefaultRootObject'])
 			pretty_output("Etag", response['headers']['etag'])
 
 	@staticmethod
 	def delete(args):
 		cf = CloudFront(Config())
-		cfuris = []
-		for arg in args:
-			cfuris.append(S3Uri(arg))
-			if cfuris[-1].type != 'cf':
-				raise ParameterError("CloudFront URI required instead of: %s" % arg)
+		cfuris = Cmd._parse_args(args)
 		for cfuri in cfuris:
 			response = cf.DeleteDistribution(cfuri)
 			if response['status'] >= 400:
@@ -452,17 +515,19 @@ class Cmd(object):
 	@staticmethod
 	def modify(args):
 		cf = CloudFront(Config())
-		cfuri = S3Uri(args.pop(0))
-		if cfuri.type != 'cf':
-			raise ParameterError("CloudFront URI required instead of: %s" % arg)
-		if len(args):
+		if len(args) > 1:
 			raise ParameterError("Too many parameters. Modify one Distribution at a time.")
-
+		try:
+			cfuri = Cmd._parse_args(args)[0]
+		except IndexError, e:
+			raise ParameterError("No valid Distribution URI found.")
 		response = cf.ModifyDistribution(cfuri,
 		                                 cnames_add = Cmd.options.cf_cnames_add,
 		                                 cnames_remove = Cmd.options.cf_cnames_remove,
 		                                 comment = Cmd.options.cf_comment,
-		                                 enabled = Cmd.options.cf_enable)
+		                                 enabled = Cmd.options.cf_enable,
+		                                 logging = Cmd.options.cf_logging,
+                                         default_root_object = Cmd.options.cf_default_root_object)
 		if response['status'] >= 400:
 			error("Distribution %s could not be modified: %s" % (cfuri, response['reason']))
 		output("Distribution modified: %s" % cfuri)
@@ -476,4 +541,5 @@ class Cmd(object):
 		pretty_output("CNAMEs", ", ".join(dc.info['CNAME']))
 		pretty_output("Comment", dc.info['Comment'])
 		pretty_output("Enabled", dc.info['Enabled'])
+		pretty_output("DefaultRootObject", dc.info['DefaultRootObject'])
 		pretty_output("Etag", response['headers']['etag'])
