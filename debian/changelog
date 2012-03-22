@@ -1,3 +1,13 @@
+s3cmd (1.0.0-2) unstable; urgency=low
+
+  * debian/control: Bump Standards-Version, no changes required.
+  * Switch to use dh(1).
+  * Drop pre-python-2.5 stanza from debian/control.
+  * Update debian/copyright to version 1.0 of machine-readable format.
+  * Post-Squeeze removal of s3cmd.preinst.
+  
+ -- Mikhail Gusarov <dottedmag@debian.org>  Thu, 22 Mar 2012 23:04:45 +0100
+  
 s3cmd (1.0.0-1) unstable; urgency=low
 
   * New upstream release.
@@ -9,7 +19,7 @@ s3cmd (1.0.0-1) unstable; urgency=low
   * Add debian/patches/fix-mangpage-typos.patch to correct typos catched
     by lintian.
 
- -- Mikhail Gusarov <dottedmag@dottedmag.net>  Mon, 28 Mar 2011 12:09:17 +0200
+ -- Mikhail Gusarov <dottedmag@debian.org>  Mon, 28 Mar 2011 12:09:17 +0200
 
 s3cmd (0.9.9.91-1) unstable; urgency=low
 
