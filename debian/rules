@@ -9,7 +9,7 @@ SHARE_DIR=/usr/share/$(PACKAGE_NAME)
 
 override_dh_auto_clean:
 	S3CMD_PACKAGING=1 python setup.py clean
-	-rm -f S3/*.pyc
+	-rm -rf S3/*.pyc build
 
 override_dh_auto_install:
 	S3CMD_PACKAGING=1 python setup.py install --no-compile \

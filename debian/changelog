@@ -1,3 +1,9 @@
+s3cmd (1.0.0-3) unstable; urgency=low
+
+  * Do not FTBFS if built twice in a row (Closes: #671219).
+
+ -- Mikhail Gusarov <dottedmag@debian.org>  Fri, 04 May 2012 00:01:18 +0200
+
 s3cmd (1.0.0-2) unstable; urgency=low
 
   * debian/control: Bump Standards-Version, no changes required.
