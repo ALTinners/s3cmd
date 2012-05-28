@@ -1,3 +1,10 @@
+s3cmd (1.1.0~beta3-1) unstable; urgency=low
+
+  * New upstream release:
+    - debian/patches: refresh.
+
+ -- Mikhail Gusarov <dottedmag@debian.org>  Mon, 28 May 2012 17:56:55 +0200
+
 s3cmd (1.0.0-3) unstable; urgency=low
 
   * Do not FTBFS if built twice in a row (Closes: #671219).

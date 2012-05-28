@@ -1,7 +1,7 @@
 # Fix warnings catched by lintian: spelling, bare hyphen, unintended
 # 'Cache-Control' expansion as macro
---- a/s3cmd.1	2011-01-09 10:03:06.000000000 +0100
-+++ b/s3cmd.1	2011-03-28 12:24:06.441185593 +0200
+--- s3cmd-1.1.0-beta3/s3cmd.1.orig	2012-05-28 18:06:12.399467659 +0200
++++ s3cmd-1.1.0-beta3/s3cmd.1	2012-05-28 18:11:01.354580791 +0200
 @@ -60,7 +60,7 @@
  s3cmd \fBaccesslog\fR \fIs3://BUCKET\fR
  Enable/disable bucket access logging
@@ -11,7 +11,16 @@
  Sign arbitrary string using the secret key
  .TP
  s3cmd \fBfixbucket\fR \fIs3://BUCKET[/PREFIX]\fR
-@@ -179,14 +179,14 @@
+@@ -116,7 +116,7 @@
+ .TP
+ \fB\-\-configure\fR
+ Invoke interactive (re)configuration tool. Optionally
+-use as '\fB--configure\fR s3://come-bucket' to test access
++use as '\fB\-\-configure\fR s3://come\-bucket' to test access
+ to a specific bucket instead of attempting to list
+ them all.
+ .TP
+@@ -198,29 +198,29 @@
  from sync
  .TP
  \fB\-\-exclude\-from\fR=FILE
@@ -28,8 +37,9 @@
  .TP
  \fB\-\-include\fR=GLOB
  Filenames and paths matching GLOB will be included
-@@ -195,14 +195,14 @@
- \fB\-\-(r)exclude(\-from)\fR patterns
+ even if previously excluded by one of
+-\fB--(r)exclude(-from)\fR patterns
++\fB\-\-(r)exclude(\-from)\fR patterns
  .TP
  \fB\-\-include\-from\fR=FILE
 -Read --include GLOBs from FILE
@@ -46,13 +56,26 @@
  .TP
  \fB\-\-bucket\-location\fR=BUCKET_LOCATION
  Datacentre to create bucket in. As of now the
-@@ -226,13 +226,13 @@
+@@ -244,22 +244,22 @@
+ default is binary/octet-stream.
  .TP
- \fB\-M\fR, \fB\-\-guess\-mime\-type\fR
- Guess MIME-type of files by their extension. Falls
--back to default MIME-Type as specified by --mime-type
-+back to default MIME\-Type as specified by \-\-mime-type
- option
+ \fB\-\-guess\-mime\-type\fR
+-Guess MIME-type of files by their extension or mime
+-magic. Fall back to default MIME-Type as specified by
+-\fB--default-mime-type\fR option
++Guess MIME\-type of files by their extension or mime
++magic. Fall back to default MIME\-Type as specified by
++\fB\-\-default-mime-type\fR option
+ .TP
+ \fB\-\-no\-guess\-mime\-type\fR
+ Don't guess MIME-type and use the default type
+ instead.
+ .TP
+ \fB\-m\fR MIME/TYPE, \fB\-\-mime\-type\fR=MIME/TYPE
+-Force MIME-type. Override both \fB--default-mime-type\fR and
+-\fB--guess-mime-type\fR.
++Force MIME\-type. Override both \fB\-\-default\-mime\-type\fR and
++\fB\-\-guess-mime-type\fR.
  .TP
  \fB\-\-add\-header\fR=NAME:VALUE
  Add a given HTTP header to the upload request. Can be
@@ -62,7 +85,7 @@
  if you like.
  .TP
  \fB\-\-encoding\fR=ENCODING
-@@ -386,7 +386,7 @@
+@@ -435,7 +435,7 @@
  .SH AUTHOR
  Written by Michal Ludvig <mludvig@logix.net.nz> and 15+ contributors
  .SH CONTACT, SUPPORT
