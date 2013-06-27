@@ -1,2 +1,3 @@
 do-not-check-elementtree-at-build-time.patch
 fix-manpage-typos.patch
+multipart-upload-elapsed-time.patch

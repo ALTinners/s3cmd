@@ -5,8 +5,8 @@ Maintainer: Mikhail Gusarov <dottedmag@debian.org>
 Uploaders: Python Applications Packaging Team <python-apps-team@lists.alioth.debian.org>
 Build-Depends: debhelper (>= 7.0.50~), python
 Standards-Version: 3.9.3
-Vcs-Svn: svn://svn.debian.org/svn/python-apps/packages/s3cmd/trunk
-Vcs-Browser: http://svn.debian.org/viewsvn/python-apps/packages/s3cmd/trunk/
+Vcs-Svn: svn://anonscm.debian.org/python-apps/packages/s3cmd/trunk/
+Vcs-Browser: http://anonscm.debian.org/viewvc/python-apps/packages/s3cmd/trunk/
 Homepage: http://s3tools.logix.cz/s3cmd
 
 Package: s3cmd

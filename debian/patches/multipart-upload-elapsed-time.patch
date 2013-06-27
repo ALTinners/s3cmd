@@ -1,0 +1,27 @@
+Description: Compute speed and elapsed time for Multipart uploads
+ Fixes a crash with:
+  s3cmd put /xyz/big-file s3://bucket/ > /dev/null
+Author: Michal Ludvig <mludvig@logix.net.nz>
+Origin: Upstream, https://github.com/s3tools/s3cmd/commit/9c57a3ba2163915deb2cc63cefa885a66ac377ab
+Bug-Debian: http://bugs.debian.org/683558
+Bug-Upstream: https://github.com/s3tools/s3cmd/issues/24
+Last-Updated: 2013-06-27
+
+--- a/S3/S3.py
++++ b/S3/S3.py
+@@ -752,11 +752,14 @@
+ 
+     def send_file_multipart(self, file, headers, uri, size):
+         chunk_size = self.config.multipart_chunk_size_mb * 1024 * 1024
++        timestamp_start = time.time()
+         upload = MultiPartUpload(self, file, uri, headers)
+         upload.upload_all_parts()
+         response = upload.complete_multipart_upload()
+-        response["speed"] = 0 # XXX
++        timestamp_end = time.time()
++        response["elapsed"] = timestamp_end - timestamp_start
+         response["size"] = size
++        response["speed"] = response["elapsed"] and float(response["size"]) / response["elapsed"] or float(-1)
+         return response
+ 
+     def recv_file(self, request, stream, labels, start_position = 0, retries = _max_retries):

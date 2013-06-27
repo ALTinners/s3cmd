@@ -1,3 +1,14 @@
+s3cmd (1.1.0~beta3-2) unstable; urgency=low
+
+  [ Jakub Wilk ]
+  * Use canonical URIs for Vcs-* fields.
+
+  [ Stefano Rivera ]
+  * Team upload.
+  * Fix crash in multi-part uploads (Closes: #683558, LP: #1188160)
+
+ -- Stefano Rivera <stefanor@debian.org>  Thu, 27 Jun 2013 14:25:05 +0200
+
 s3cmd (1.1.0~beta3-1) unstable; urgency=low
 
   * New upstream release:
