@@ -5,7 +5,7 @@ PACKAGE_DIR=$(CURDIR)/debian/$(PACKAGE_NAME)
 SHARE_DIR=/usr/share/$(PACKAGE_NAME)
 
 %:
-	dh $@ --with python2
+	dh $@ --with python2 --buildsystem python_distutils
 
 override_dh_auto_clean:
 	S3CMD_PACKAGING=1 python setup.py clean
@@ -16,3 +16,10 @@ override_dh_auto_install:
 		 --root $(PACKAGE_DIR) \
 		 --install-lib $(SHARE_DIR) \
 		 --install-scripts $(SHARE_DIR)
+
+O=s3cmd_1.5.0~20140213.orig.tar.gz
+GH=https://github.com/s3tools/s3cmd/tarball
+ID=9d69f990d62a16866c700ccc90d95adef99bef74
+
+get-orig-source:
+	wget -O $(CURDIR)/../$(O) $(GH)/$(ID)

@@ -1,4 +1,8 @@
 
+.\" !!! IMPORTANT: This file is generated from s3cmd --help output using format-manpage.pl
+.\" !!!            Do your changes either in s3cmd file or in 'format-manpage.pl' otherwise
+.\" !!!            they will be overwritten!
+
 .TH s3cmd 1
 .SH NAME
 s3cmd \- tool for managing Amazon S3 storage space and Amazon CloudFront content delivery network
@@ -57,11 +61,29 @@ Move object
 s3cmd \fBsetacl\fR \fIs3://BUCKET[/OBJECT]\fR
 Modify Access control list for Bucket or Files
 .TP
+s3cmd \fBsetpolicy\fR \fIFILE s3://BUCKET\fR
+Modify Bucket Policy
+.TP
+s3cmd \fBdelpolicy\fR \fIs3://BUCKET\fR
+Delete Bucket Policy
+.TP
+s3cmd \fBmultipart\fR \fIs3://BUCKET [Id]\fR
+show multipart uploads
+.TP
+s3cmd \fBabortmp\fR \fIs3://BUCKET/OBJECT Id\fR
+abort a multipart upload
+.TP
+s3cmd \fBlistmp\fR \fIs3://BUCKET/OBJECT Id\fR
+list parts of a multipart upload
+.TP
 s3cmd \fBaccesslog\fR \fIs3://BUCKET\fR
 Enable/disable bucket access logging
 .TP
 s3cmd \fBsign\fR \fISTRING-TO-SIGN\fR
 Sign arbitrary string using the secret key
+.TP
+s3cmd \fBsignurl\fR \fIs3://BUCKET/OBJECT expiry_epoch\fR
+Sign an S3 URL to provide limited public access with expiry
 .TP
 s3cmd \fBfixbucket\fR \fIs3://BUCKET[/PREFIX]\fR
 Fix invalid file names in a bucket
@@ -116,7 +138,7 @@ show this help message and exit
 .TP
 \fB\-\-configure\fR
 Invoke interactive (re)configuration tool. Optionally
-use as '\fB--configure\fR s3://come-bucket' to test access
+use as '\fB--configure\fR s3://some-bucket' to test access
 to a specific bucket instead of attempting to list
 them all.
 .TP
@@ -126,6 +148,12 @@ Config file name. Defaults to /home/mludvig/.s3cfg
 \fB\-\-dump\-config\fR
 Dump current configuration after parsing config files
 and command line options and exit.
+.TP
+\fB\-\-access_key\fR=ACCESS_KEY
+AWS Access Key
+.TP
+\fB\-\-secret_key\fR=SECRET_KEY
+AWS Secret Key
 .TP
 \fB\-n\fR, \fB\-\-dry\-run\fR
 Only show what should be uploaded or downloaded but
@@ -145,6 +173,21 @@ Force overwrite and other dangerous operations.
 \fB\-\-continue\fR
 Continue getting a partially downloaded file (only for
 [get] command).
+.TP
+\fB\-\-continue\-put\fR
+Continue uploading partially uploaded files or
+multipart upload parts.  Restarts/parts files that
+don't have matching size and md5.  Skips files/parts
+that do.  Note: md5sum checks are not always
+sufficient to check (part) file equality.  Enable this
+at your own risk.
+.TP
+\fB\-\-upload\-id\fR=UPLOAD_ID
+UploadId for Multipart Upload, in case you want
+continue an existing upload (equivalent to \fB--continue-\fR
+put) and there are multiple partial uploads.  Use
+s3cmd multipart [URI] to see what UploadIds are
+associated with the given URI.
 .TP
 \fB\-\-skip\-existing\fR
 Skip over files that exist at the destination (only
@@ -186,6 +229,23 @@ Delete remote objects with no corresponding local file
 \fB\-\-no\-delete\-removed\fR
 Don't delete remote objects.
 .TP
+\fB\-\-delete\-after\fR
+Perform deletes after new uploads [sync]
+.TP
+\fB\-\-delay\-updates\fR
+Put all updated files into place at end [sync]
+.TP
+\fB\-\-max\-delete\fR=NUM
+Do not delete more than NUM files. [del] and [sync]
+.TP
+\fB\-\-add\-destination\fR=ADDITIONAL_DESTINATIONS
+Additional destination for parallel uploads, in
+addition to last arg.  May be repeated.
+.TP
+\fB\-\-delete\-after\-fetch\fR
+Delete remote objects after fetching to local file
+(only for [get] and [sync] commands).
+.TP
 \fB\-p\fR, \fB\-\-preserve\fR
 Preserve filesystem attributes (mode, ownership,
 timestamps). Default for [sync] command.
@@ -222,10 +282,17 @@ instead of GLOB
 \fB\-\-rinclude\-from\fR=FILE
 Read --rinclude REGEXPs from FILE
 .TP
+\fB\-\-ignore\-failed\-copy\fR
+Don't exit unsuccessfully because of missing keys
+.TP
+\fB\-\-files\-from\fR=FILE
+Read list of source-file names from FILE. Use - to
+read from stdin.
+.TP
 \fB\-\-bucket\-location\fR=BUCKET_LOCATION
 Datacentre to create bucket in. As of now the
-datacenters are: US (default), EU, us-west-1, and ap-
-southeast-1
+datacenters are: US (default), EU, ap-northeast-1, ap-
+southeast-1, sa-east-1, us-west-1 and us-west-2
 .TP
 \fB\-\-reduced\-redundancy\fR, \fB\-\-rr\fR
 Store object with 'Reduced redundancy'. Lower per-GB
@@ -239,11 +306,11 @@ and [accesslog] commands)
 Disable access logging (for [cfmodify] and [accesslog]
 commands)
 .TP
-\fB\-\-default\-mime\-type\fR
+\fB\-\-default\-mime\-type\fR=DEFAULT_MIME_TYPE
 Default MIME-type for stored objects. Application
 default is binary/octet-stream.
 .TP
-\fB\-\-guess\-mime\-type\fR
+\fB\-M\fR, \fB\-\-guess\-mime\-type\fR
 Guess MIME-type of files by their extension or mime
 magic. Fall back to default MIME-Type as specified by
 \fB--default-mime-type\fR option
@@ -251,6 +318,9 @@ magic. Fall back to default MIME-Type as specified by
 \fB\-\-no\-guess\-mime\-type\fR
 Don't guess MIME-type and use the default type
 instead.
+.TP
+\fB\-\-no\-mime\-magic\fR
+Don't use mime magic when guessing MIME-type.
 .TP
 \fB\-m\fR MIME/TYPE, \fB\-\-mime\-type\fR=MIME/TYPE
 Force MIME-type. Override both \fB--default-mime-type\fR and
@@ -262,9 +332,21 @@ used multiple times. For instance set 'Expires' or
 'Cache-Control' headers (or both) using this options
 if you like.
 .TP
+\fB\-\-server\-side\-encryption\fR
+Specifies that server-side encryption will be used
+when putting objects.
+.TP
 \fB\-\-encoding\fR=ENCODING
 Override autodetected terminal and filesystem encoding
 (character set). Autodetected: UTF-8
+.TP
+\fB\-\-disable\-content\-encoding\fR
+Don't include a Content-encoding header to the the
+uploaded objects
+.TP
+\fB\-\-add\-encoding\-exts\fR=EXTENSIONs
+Add encoding to these comma delimited extensions i.e.
+(css,js,html) when uploading to S3 )
 .TP
 \fB\-\-verbatim\fR
 Use the S3 name as given on the command line. No pre-
@@ -291,10 +373,10 @@ Print sizes in human readable form (eg 1kB instead of
 1234).
 .TP
 \fB\-\-ws\-index\fR=WEBSITE_INDEX
-Name of error-document (only for [ws-create] command)
+Name of index-document (only for [ws-create] command)
 .TP
 \fB\-\-ws\-error\fR=WEBSITE_ERROR
-Name of index-document (only for [ws-create] command)
+Name of error-document (only for [ws-create] command)
 .TP
 \fB\-\-progress\fR
 Display progress meter (default on TTY).
@@ -313,6 +395,14 @@ Enable given CloudFront distribution (only for
 \fB\-\-cf\-invalidate\fR
 Invalidate the uploaded filed in CloudFront. Also see
 [cfinval] command.
+.TP
+\fB\-\-cf\-invalidate\-default\-index\fR
+When using Custom Origin and S3 static website,
+invalidate the default index file.
+.TP
+\fB\-\-cf\-no\-invalidate\-default\-index\-root\fR
+When using Custom Origin and S3 static website, don't
+invalidate the path to the default index file.
 .TP
 \fB\-\-cf\-add\-cname\fR=CNAME
 Add given CNAME to a CloudFront distribution (only for
@@ -340,10 +430,16 @@ Enable verbose output.
 Enable debug output.
 .TP
 \fB\-\-version\fR
-Show s3cmd version (1.1.0-beta3) and exit.
+Show s3cmd version (1.5.0-beta1) and exit.
 .TP
 \fB\-F\fR, \fB\-\-follow\-symlinks\fR
 Follow symbolic links as if they are regular files
+.TP
+\fB\-\-cache\-file\fR=FILE
+Cache FILE containing local source MD5 values
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Silence output on stdout
 
 
 .SH EXAMPLES
@@ -435,7 +531,7 @@ Please consider a donation if you have found s3cmd useful:
 .SH AUTHOR
 Written by Michal Ludvig <mludvig@logix.net.nz> and 15+ contributors
 .SH CONTACT, SUPPORT
-Prefered way to get support is our mailing list:
+Preferred way to get support is our mailing list:
 .I s3tools\-general@lists.sourceforge.net
 .SH REPORTING BUGS
 Report bugs to 

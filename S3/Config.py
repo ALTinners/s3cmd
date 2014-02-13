@@ -7,8 +7,14 @@ import logging
 from logging import debug, info, warning, error
 import re
 import os
+import sys
 import Progress
 from SortedDict import SortedDict
+import httplib
+try:
+    import json
+except ImportError, e:
+    pass
 
 class Config(object):
     _instance = None
@@ -16,6 +22,7 @@ class Config(object):
     _doc = {}
     access_key = ""
     secret_key = ""
+    access_token = ""
     host_base = "s3.amazonaws.com"
     host_bucket = "%(bucket)s.s3.amazonaws.com"
     simpledb_host = "sdb.amazonaws.com"
@@ -29,10 +36,14 @@ class Config(object):
     human_readable_sizes = False
     extra_headers = SortedDict(ignore_case = True)
     force = False
+    server_side_encryption = False
     enable = None
     get_continue = False
+    put_continue = False
+    upload_id = None
     skip_existing = False
     recursive = False
+    restore_days = 1
     acl_public = None
     acl_grants = []
     acl_revokes = []
@@ -40,6 +51,7 @@ class Config(object):
     proxy_port = 3128
     encrypt = False
     dry_run = False
+    add_encoding_exts = ""
     preserve_attrs = True
     preserve_attrs_list = [
         'uname',    # Verbose owner Name (e.g. 'root')
@@ -50,10 +62,15 @@ class Config(object):
         'mtime',    # Modification timestamp
         'ctime',    # Creation timestamp
         'mode',     # File mode (e.g. rwxr-xr-x = 755)
+        'md5',      # File MD5 (if known)
         #'acl',     # Full ACL (not yet supported)
     ]
     delete_removed = False
+    delete_after = False
+    delete_after_fetch = False
+    max_delete = -1
     _doc['delete_removed'] = "[sync] Remove remote S3 objects when local file has been deleted"
+    delay_updates = False
     gpg_passphrase = ""
     gpg_command = ""
     gpg_encrypt = "%(gpg_command)s -c --verbose --no-use-agent --batch --yes --passphrase-fd %(passphrase_fd)s -o %(output_file)s %(input_file)s"
@@ -62,6 +79,7 @@ class Config(object):
     bucket_location = "US"
     default_mime_type = "binary/octet-stream"
     guess_mime_type = True
+    use_mime_magic = True
     mime_type = ""
     enable_multipart = True
     multipart_chunk_size_mb = 15    # MB
@@ -74,15 +92,24 @@ class Config(object):
     debug_exclude = {}
     debug_include = {}
     encoding = "utf-8"
+    add_content_encoding = True
     urlencoding_mode = "normal"
     log_target_prefix = ""
     reduced_redundancy = False
     follow_symlinks = False
     socket_timeout = 300
     invalidate_on_cf = False
+    # joseprio: new flags for default index invalidation
+    invalidate_default_index_on_cf = False
+    invalidate_default_index_root_on_cf = True
     website_index = "index.html"
     website_error = ""
     website_endpoint = "http://%(bucket)s.s3-website-%(location)s.amazonaws.com/"
+    additional_destinations = []
+    files_from = []
+    cache_file = ""
+    add_headers = ""
+    ignore_failed_copy = False
 
     ## Creating a singleton
     def __new__(self, configfile = None):
@@ -92,7 +119,77 @@ class Config(object):
 
     def __init__(self, configfile = None):
         if configfile:
-            self.read_config_file(configfile)
+            try:
+                self.read_config_file(configfile)
+            except IOError, e:
+                if 'AWS_CREDENTIAL_FILE' in os.environ:
+                    self.env_config()
+            if len(self.access_key)==0:
+                self.role_config()
+
+    def role_config(self):
+        if sys.version_info[0] * 10 + sys.version_info[1] < 26:
+            error("IAM authentication requires Python 2.6 or newer")
+            raise
+        if not 'json' in sys.modules:
+            error("IAM authentication not available -- missing module json")
+            raise
+        try:
+            conn = httplib.HTTPConnection(host='169.254.169.254', timeout = 2)
+            conn.request('GET', "/latest/meta-data/iam/security-credentials/")
+            resp = conn.getresponse()
+            files = resp.read()
+            if resp.status == 200 and len(files)>1:
+                conn.request('GET', "/latest/meta-data/iam/security-credentials/%s"%files)
+                resp=conn.getresponse()
+                if resp.status == 200:
+                    creds=json.load(resp)
+                    Config().update_option('access_key', creds['AccessKeyId'].encode('ascii'))
+                    Config().update_option('secret_key', creds['SecretAccessKey'].encode('ascii'))
+                    Config().update_option('access_token', creds['Token'].encode('ascii'))
+                else:
+                    raise IOError
+            else:
+                raise IOError
+        except:
+            raise
+
+    def role_refresh(self):
+        try:
+            self.role_config()
+        except:
+            warning("Could not refresh role")
+
+    def env_config(self):
+        cred_content = ""
+        try:
+            cred_file = open(os.environ['AWS_CREDENTIAL_FILE'],'r')
+            cred_content = cred_file.read()
+        except IOError, e:
+            debug("Error %d accessing credentials file %s" % (e.errno,os.environ['AWS_CREDENTIAL_FILE']))
+        r_data = re.compile("^\s*(?P<orig_key>\w+)\s*=\s*(?P<value>.*)")
+        r_quotes = re.compile("^\"(.*)\"\s*$")
+        if len(cred_content)>0:
+            for line in cred_content.splitlines():
+                is_data = r_data.match(line)
+                is_data = r_data.match(line)
+                if is_data:
+                    data = is_data.groupdict()
+                    if r_quotes.match(data["value"]):
+                        data["value"] = data["value"][1:-1]
+                    if data["orig_key"]=="AWSAccessKeyId":
+                        data["key"] = "access_key"
+                    elif data["orig_key"]=="AWSSecretKey":
+                        data["key"] = "secret_key"
+                    else:
+                        del data["key"]
+                    if "key" in data:
+                        Config().update_option(data["key"], data["value"])
+                        if data["key"] in ("access_key", "secret_key", "gpg_passphrase"):
+                            print_value = ("%s...%d_chars...%s") % (data["value"][:2], len(data["value"]) - 3, data["value"][-1:])
+                        else:
+                            print_value = data["value"]
+                        debug("env_Config: %s->%s" % (data["key"], print_value))
 
     def option_list(self):
         retval = []
@@ -112,6 +209,12 @@ class Config(object):
         cp = ConfigParser(configfile)
         for option in self.option_list():
             self.update_option(option, cp.get(option))
+
+        if cp.get('add_headers'):
+            for option in cp.get('add_headers').split(","):
+                (key, value) = option.split(':')
+                self.extra_headers[key.replace('_', '-').strip()] = value.strip()
+
         self._parsed_files.append(configfile)
 
     def dump_config(self, stream):
@@ -177,7 +280,7 @@ class ConfigParser(object):
                     data["value"] = data["value"][1:-1]
                 self.__setitem__(data["key"], data["value"])
                 if data["key"] in ("access_key", "secret_key", "gpg_passphrase"):
-                    print_value = (data["value"][:2]+"...%d_chars..."+data["value"][-1:]) % (len(data["value"]) - 3)
+                    print_value = ("%s...%d_chars...%s") % (data["value"][:2], len(data["value"]) - 3, data["value"][-1:])
                 else:
                     print_value = data["value"]
                 debug("ConfigParser: %s->%s" % (data["key"], print_value))
