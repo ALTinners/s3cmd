@@ -1,7 +1,0 @@
-*.pyc
-*.swp
-testsuite
-/MANIFEST
-/dist
-build/*
-s3cmd.spec

@@ -2,7 +2,7 @@
 # 'Cache-Control' expansion as macro
 --- a/s3cmd.1
 +++ b/s3cmd.1
-@@ -79,7 +79,7 @@
+@@ -88,7 +88,7 @@
  s3cmd \fBaccesslog\fR \fIs3://BUCKET\fR
  Enable/disable bucket access logging
  .TP
@@ -11,7 +11,7 @@
  Sign arbitrary string using the secret key
  .TP
  s3cmd \fBsignurl\fR \fIs3://BUCKET/OBJECT expiry_epoch\fR
-@@ -138,7 +138,7 @@
+@@ -156,7 +156,7 @@
  .TP
  \fB\-\-configure\fR
  Invoke interactive (re)configuration tool. Optionally
@@ -20,7 +20,7 @@
  to a specific bucket instead of attempting to list
  them all.
  .TP
-@@ -258,29 +258,29 @@
+@@ -280,29 +280,29 @@
  from sync
  .TP
  \fB\-\-exclude\-from\fR=FILE
@@ -56,7 +56,7 @@
  .TP
  \fB\-\-ignore\-failed\-copy\fR
  Don't exit unsuccessfully because of missing keys
-@@ -311,9 +311,9 @@
+@@ -333,9 +333,9 @@
  default is binary/octet-stream.
  .TP
  \fB\-M\fR, \fB\-\-guess\-mime\-type\fR
@@ -69,20 +69,20 @@
  .TP
  \fB\-\-no\-guess\-mime\-type\fR
  Don't guess MIME-type and use the default type
-@@ -323,13 +323,13 @@
+@@ -345,13 +345,13 @@
  Don't use mime magic when guessing MIME-type.
  .TP
  \fB\-m\fR MIME/TYPE, \fB\-\-mime\-type\fR=MIME/TYPE
 -Force MIME-type. Override both \fB--default-mime-type\fR and
 -\fB--guess-mime-type\fR.
-+Force MIME\-type. Override both \fB\-\-default-mime-type\fR and
-+\fB\-\-guess-mime-type\fR.
++Force MIME\-type. Override both \fB\-\-default\-mime\-type\fR
++and \fB\-\-guess\-mime\-type\fR.
  .TP
  \fB\-\-add\-header\fR=NAME:VALUE
  Add a given HTTP header to the upload request. Can be
  used multiple times. For instance set 'Expires' or
--'Cache-Control' headers (or both) using this options
-+\&'Cache-Control' headers (or both) using this options
- if you like.
+-'Cache-Control' headers (or both) using this option.
++\&'Cache-Control' headers (or both) using this option.
  .TP
  \fB\-\-server\-side\-encryption\fR
+ Specifies that server-side encryption will be used
