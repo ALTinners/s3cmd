@@ -1,2 +1,5 @@
 do-not-check-elementtree-at-build-time.patch
 fix-manpage-typos.patch
+return-non-zero-code-from-put-command.patch
+do-not-loop-in-rb.patch
+manpage-sync-checks.patch

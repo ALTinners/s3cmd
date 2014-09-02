@@ -1,8 +1,19 @@
+s3cmd (1.5.0~rc1-2) unstable; urgency=low
+
+  * Add missing python-dateutil, python-magic dependencies
+    (Closes: #754301, #718673).
+  * debian/patches/do-not-loop-in-rb.patch. New patch (Closes: #750561).
+  * debian/patches/return-non-zero-code-from-put-command. New patch
+    (Closes: #669002).
+  * debian/patches/manpage-sync-checks.patch. New patch (Closes: #534733).
+
+ -- Mikhail Gusarov <dottedmag@debian.org>  Tue, 02 Sep 2014 19:45:02 +0200
+
 s3cmd (1.5.0~rc1-1) experimental; urgency=low
 
   * Upstream release candidate.
 
- -- Mikhail Gusarov <dottedmag@debian.org>  Fri, 04 Jul 2014 12:17:16 +0200
+ -- Mikhail Gusarov <dottedmag@debian.org>  Fri, 04 Jul 2014 12:16:27 +0200
 
 s3cmd (1.5.0~20140213-1) experimental; urgency=low
 
