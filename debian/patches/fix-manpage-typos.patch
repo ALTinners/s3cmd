@@ -1,7 +1,13 @@
+Description: Fix manpage typos
+Forwarded: https://github.com/s3tools/s3cmd/pull/504
+Last-Update: 2015-03-18
+
 # Fix warnings catched by lintian: spelling, bare hyphen, unintended
 # 'Cache-Control' expansion as macro
---- a/s3cmd.1
-+++ b/s3cmd.1
+Index: s3cmd/s3cmd.1
+===================================================================
+--- s3cmd.orig/s3cmd.1	2015-03-18 11:54:55.154543642 +0100
++++ s3cmd/s3cmd.1	2015-03-18 11:54:55.150543627 +0100
 @@ -88,7 +88,7 @@
  s3cmd \fBaccesslog\fR \fIs3://BUCKET\fR
  Enable/disable bucket access logging
@@ -10,7 +16,7 @@
 +s3cmd \fBsign\fR \fISTRING\-TO\-SIGN\fR
  Sign arbitrary string using the secret key
  .TP
- s3cmd \fBsignurl\fR \fIs3://BUCKET/OBJECT expiry_epoch\fR
+ s3cmd \fBsignurl\fR \fIs3://BUCKET/OBJECT <expiry_epoch|+expiry_offset>\fR
 @@ -156,7 +156,7 @@
  .TP
  \fB\-\-configure\fR
@@ -20,7 +26,7 @@
  to a specific bucket instead of attempting to list
  them all.
  .TP
-@@ -280,29 +280,29 @@
+@@ -286,29 +286,29 @@
  from sync
  .TP
  \fB\-\-exclude\-from\fR=FILE
@@ -56,7 +62,7 @@
  .TP
  \fB\-\-ignore\-failed\-copy\fR
  Don't exit unsuccessfully because of missing keys
-@@ -333,9 +333,9 @@
+@@ -344,9 +344,9 @@
  default is binary/octet-stream.
  .TP
  \fB\-M\fR, \fB\-\-guess\-mime\-type\fR
@@ -69,7 +75,7 @@
  .TP
  \fB\-\-no\-guess\-mime\-type\fR
  Don't guess MIME-type and use the default type
-@@ -345,13 +345,13 @@
+@@ -356,13 +356,13 @@
  Don't use mime magic when guessing MIME-type.
  .TP
  \fB\-m\fR MIME/TYPE, \fB\-\-mime\-type\fR=MIME/TYPE
@@ -84,5 +90,5 @@
 -'Cache-Control' headers (or both) using this option.
 +\&'Cache-Control' headers (or both) using this option.
  .TP
- \fB\-\-server\-side\-encryption\fR
- Specifies that server-side encryption will be used
+ \fB\-\-remove\-header\fR=NAME
+ Remove a given HTTP header.  Can be used multiple

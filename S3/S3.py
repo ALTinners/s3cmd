@@ -33,6 +33,8 @@ from Exceptions import *
 from MultiPart import MultiPartUpload
 from S3Uri import S3Uri
 from ConnMan import ConnMan
+from Crypto import sign_string_v2, sign_string_v4, checksum_sha256_file, checksum_sha256_buffer
+from ExitCodes import *
 
 try:
     import magic
@@ -61,7 +63,7 @@ try:
             return magic_.file(file)
 
 except ImportError, e:
-    if str(e).find("magic") >= 0:
+    if 'magic' in str(e):
         magic_message = "Module python-magic is not available."
     else:
         magic_message = "Module python-magic can't be used (%s)." % e.message
@@ -101,21 +103,18 @@ def mime_magic(file):
 
 __all__ = []
 class S3Request(object):
-    def __init__(self, s3, method_string, resource, headers, params = {}):
+    region_map = {}
+
+    def __init__(self, s3, method_string, resource, headers, body, params = {}):
         self.s3 = s3
         self.headers = SortedDict(headers or {}, ignore_case = True)
-        # Add in any extra headers from s3 config object
-        if self.s3.config.extra_headers:
-            self.headers.update(self.s3.config.extra_headers)
         if len(self.s3.config.access_token)>0:
             self.s3.config.role_refresh()
             self.headers['x-amz-security-token']=self.s3.config.access_token
         self.resource = resource
         self.method_string = method_string
         self.params = params
-
-        self.update_timestamp()
-        self.sign()
+        self.body = body
 
     def update_timestamp(self):
         if self.headers.has_key("date"):
@@ -137,21 +136,42 @@ class S3Request(object):
                 param_str += "&%s" % param
         return param_str and "?" + param_str[1:]
 
+    def use_signature_v2(self):
+        if self.s3.endpoint_requires_signature_v4:
+            return False
+        # in case of bad DNS name due to bucket name v2 will be used
+        # this way we can still use capital letters in bucket names for the older regions
+
+        if self.resource['bucket'] is None or not check_bucket_name_dns_conformity(self.resource['bucket']) or self.s3.config.signature_v2 or self.s3.fallback_to_signature_v2:
+            return True
+        return False
+
     def sign(self):
         h  = self.method_string + "\n"
         h += self.headers.get("content-md5", "")+"\n"
         h += self.headers.get("content-type", "")+"\n"
         h += self.headers.get("date", "")+"\n"
-        for header in self.headers.keys():
+        for header in sorted(self.headers.keys()):
             if header.startswith("x-amz-"):
                 h += header+":"+str(self.headers[header])+"\n"
         if self.resource['bucket']:
             h += "/" + self.resource['bucket']
         h += self.resource['uri']
-        debug("SignHeaders: " + repr(h))
-        signature = sign_string(h)
 
-        self.headers["Authorization"] = "AWS "+self.s3.config.access_key+":"+signature
+        if self.use_signature_v2():
+            debug("Using signature v2")
+            debug("SignHeaders: " + repr(h))
+            signature = sign_string_v2(h)
+            self.headers["Authorization"] = "AWS "+self.s3.config.access_key+":"+signature
+        else:
+            debug("Using signature v4")
+            self.headers = sign_string_v4(self.method_string,
+                                          self.s3.get_hostname(self.resource['bucket']),
+                                          self.resource['uri'],
+                                          self.params,
+                                          S3Request.region_map.get(self.resource['bucket'], Config().bucket_location),
+                                          self.headers,
+                                          self.body)
 
     def get_triplet(self):
         self.update_timestamp()
@@ -206,9 +226,11 @@ class S3(object):
 
     def __init__(self, config):
         self.config = config
+        self.fallback_to_signature_v2 = False
+        self.endpoint_requires_signature_v4 = False
 
     def get_hostname(self, bucket):
-        if bucket and check_bucket_name_dns_conformity(bucket):
+        if bucket and check_bucket_name_dns_support(self.config.host_bucket, bucket):
             if self.redir_map.has_key(bucket):
                 host = self.redir_map[bucket]
             else:
@@ -222,7 +244,7 @@ class S3(object):
         self.redir_map[bucket] = redir_hostname
 
     def format_uri(self, resource):
-        if resource['bucket'] and not check_bucket_name_dns_conformity(resource['bucket']):
+        if resource['bucket'] and not check_bucket_name_dns_support(self.config.host_bucket, resource['bucket']):
             uri = "/%s%s" % (resource['bucket'], resource['uri'])
         else:
             uri = resource['uri']
@@ -249,6 +271,7 @@ class S3(object):
 
         def _get_common_prefixes(data):
             return getListFromXml(data, "CommonPrefixes")
+
 
         uri_params = uri_params.copy()
         truncated = True
@@ -302,8 +325,9 @@ class S3(object):
             check_bucket_name(bucket, dns_strict = False)
         if self.config.acl_public:
             headers["x-amz-acl"] = "public-read"
-        request = self.create_request("BUCKET_CREATE", bucket = bucket, headers = headers)
-        response = self.send_request(request, body)
+
+        request = self.create_request("BUCKET_CREATE", bucket = bucket, headers = headers, body = body)
+        response = self.send_request(request)
         return response
 
     def bucket_delete(self, bucket):
@@ -330,11 +354,10 @@ class S3(object):
     def website_info(self, uri, bucket_location = None):
         headers = SortedDict(ignore_case = True)
         bucket = uri.bucket()
-        body = ""
 
         request = self.create_request("BUCKET_LIST", bucket = bucket, extra="?website")
         try:
-            response = self.send_request(request, body)
+            response = self.send_request(request)
             response['index_document'] = getTextFromXml(response['data'], ".//IndexDocument//Suffix")
             response['error_document'] = getTextFromXml(response['data'], ".//ErrorDocument//Key")
             response['website_endpoint'] = self.config.website_endpoint % {
@@ -360,9 +383,8 @@ class S3(object):
             body += '  </ErrorDocument>'
         body += '</WebsiteConfiguration>'
 
-        request = self.create_request("BUCKET_CREATE", bucket = bucket, extra="?website")
-        debug("About to send request '%s' with body '%s'" % (request, body))
-        response = self.send_request(request, body)
+        request = self.create_request("BUCKET_CREATE", bucket = bucket, extra="?website", body = body)
+        response = self.send_request(request)
         debug("Received response '%s'" % (response))
 
         return response
@@ -370,11 +392,9 @@ class S3(object):
     def website_delete(self, uri, bucket_location = None):
         headers = SortedDict(ignore_case = True)
         bucket = uri.bucket()
-        body = ""
 
         request = self.create_request("BUCKET_DELETE", bucket = bucket, extra="?website")
-        debug("About to send request '%s' with body '%s'" % (request, body))
-        response = self.send_request(request, body)
+        response = self.send_request(request)
         debug("Received response '%s'" % (response))
 
         if response['status'] != 204:
@@ -385,11 +405,10 @@ class S3(object):
     def expiration_info(self, uri, bucket_location = None):
         headers = SortedDict(ignore_case = True)
         bucket = uri.bucket()
-        body = ""
 
         request = self.create_request("BUCKET_LIST", bucket = bucket, extra="?lifecycle")
         try:
-            response = self.send_request(request, body)
+            response = self.send_request(request)
             response['prefix'] = getTextFromXml(response['data'], ".//Rule//Prefix")
             response['date'] = getTextFromXml(response['data'], ".//Rule//Expiration//Date")
             response['days'] = getTextFromXml(response['data'], ".//Rule//Expiration//Days")
@@ -408,12 +427,10 @@ class S3(object):
                  raise ParameterError("Expect either --expiry-day or --expiry-date")
              debug("del bucket lifecycle")
              bucket = uri.bucket()
-             body = ""
              request = self.create_request("BUCKET_DELETE", bucket = bucket, extra="?lifecycle")
         else:
-             request, body = self._expiration_set(uri)
-        debug("About to send request '%s' with body '%s'" % (request, body))
-        response = self.send_request(request, body)
+             request = self._expiration_set(uri)
+        response = self.send_request(request)
         debug("Received response '%s'" % (response))
         return response
 
@@ -435,11 +452,53 @@ class S3(object):
         headers = SortedDict(ignore_case = True)
         headers['content-md5'] = compute_content_md5(body)
         bucket = uri.bucket()
-        request =  self.create_request("BUCKET_CREATE", bucket = bucket, headers = headers, extra="?lifecycle")
-        return (request, body)
+        request =  self.create_request("BUCKET_CREATE", bucket = bucket, headers = headers, extra="?lifecycle", body = body)
+        return (request)
+
+    def _guess_content_type(self, filename):
+        content_type = self.config.default_mime_type
+        content_charset = None
+
+        if filename == "-" and not self.config.default_mime_type:
+            raise ParameterError("You must specify --mime-type or --default-mime-type for files uploaded from stdin.")
+
+        if self.config.guess_mime_type:
+            if self.config.use_mime_magic:
+                (content_type, content_charset) = mime_magic(filename)
+            else:
+                (content_type, content_charset) = mimetypes.guess_type(filename)
+        if not content_type:
+            content_type = self.config.default_mime_type
+        return (content_type, content_charset)
+
+    def stdin_content_type(self):
+        content_type = self.config.mime_type
+        if content_type == '':
+            content_type = self.config.default_mime_type
+
+        content_type += "; charset=" + self.config.encoding.upper()
+        return content_type
+
+    def content_type(self, filename=None):
+        # explicit command line argument always wins
+        content_type = self.config.mime_type
+        content_charset = None
+
+        if filename == u'-':
+            return self.stdin_content_type()
+        if not content_type:
+            (content_type, content_charset) = self._guess_content_type(filename)
+
+        ## add charset to content type
+        if not content_charset:
+            content_charset = self.config.encoding.upper()
+        if self.add_encoding(filename, content_type) and content_charset is not None:
+            content_type = content_type + "; charset=" + content_charset
+
+        return content_type
 
     def add_encoding(self, filename, content_type):
-        if content_type.find("charset=") != -1:
+        if 'charset=' in content_type:
            return False
         exts = self.config.add_encoding_exts.split(',')
         if exts[0]=='':
@@ -480,23 +539,7 @@ class S3(object):
             headers["x-amz-server-side-encryption"] = "AES256"
 
         ## MIME-type handling
-        content_type = self.config.mime_type
-        content_charset = None
-        if filename != "-" and not content_type and self.config.guess_mime_type:
-            if self.config.use_mime_magic:
-                (content_type, content_charset) = mime_magic(filename)
-            else:
-                (content_type, content_charset) = mimetypes.guess_type(filename)
-        if not content_type:
-            content_type = self.config.default_mime_type
-        if not content_charset:
-            content_charset = self.config.encoding.upper()
-
-        ## add charset to content type
-        if self.add_encoding(filename, content_type) and content_charset is not None:
-            content_type = content_type + "; charset=" + content_charset
-
-        headers["content-type"] = content_type
+        headers["content-type"] = self.content_type(filename=filename)
 
         ## Other Amazon S3 attributes
         if self.config.acl_public:
@@ -528,7 +571,7 @@ class S3(object):
 
             if info is not None:
                 remote_size = int(info['headers']['content-length'])
-                remote_checksum = info['headers']['etag'].strip('"')
+                remote_checksum = info['headers']['etag'].strip('"\'')
                 if size == remote_size:
                     checksum = calculateChecksum('', file, 0, size, self.config.send_chunk)
                     if remote_checksum == checksum:
@@ -561,7 +604,7 @@ class S3(object):
             for key in key_list:
                 uri = S3Uri(key)
                 if uri.type != "s3":
-                    raise ValueError("Excpected URI type 's3', got '%s'" % uri.type)
+                    raise ValueError("Expected URI type 's3', got '%s'" % uri.type)
                 if not uri.has_object():
                     raise ValueError("URI '%s' has no object" % key)
                 if uri.bucket() != bucket:
@@ -579,9 +622,10 @@ class S3(object):
         request_body = compose_batch_del_xml(bucket, batch)
         md5_hash = md5()
         md5_hash.update(request_body)
-        headers = {'content-md5': base64.b64encode(md5_hash.digest())}
-        request = self.create_request("BATCH_DELETE", bucket = bucket, extra = '?delete', headers = headers)
-        response = self.send_request(request, request_body)
+        headers = {'content-md5': base64.b64encode(md5_hash.digest()),
+                   'content-type': 'application/xml'}
+        request = self.create_request("BATCH_DELETE", bucket = bucket, extra = '?delete', headers = headers, body = request_body)
+        response = self.send_request(request)
         return response
 
     def object_delete(self, uri):
@@ -597,11 +641,32 @@ class S3(object):
         body = '<RestoreRequest xmlns="http://s3.amazonaws.com/doc/2006-3-01">'
         body += ('  <Days>%s</Days>' % self.config.restore_days)
         body += '</RestoreRequest>'
-        request = self.create_request("OBJECT_POST", uri = uri, extra = "?restore")
-        debug("About to send request '%s' with body '%s'" % (request, body))
-        response = self.send_request(request, body)
+        request = self.create_request("OBJECT_POST", uri = uri, extra = "?restore", body = body)
+        response = self.send_request(request)
         debug("Received response '%s'" % (response))
         return response
+
+    def _sanitize_headers(self, headers):
+        to_remove = [
+            # from http://docs.aws.amazon.com/AmazonS3/latest/dev/UsingMetadata.html
+            'date',
+            'content-length',
+            'last-modified',
+            'content-md5',
+            'x-amz-version-id',
+            'x-amz-delete-marker',
+            # other headers returned from object_info() we don't want to send
+            'accept-ranges',
+            'etag',
+            'server',
+            'x-amz-id-2',
+            'x-amz-request-id',
+        ]
+
+        for h in to_remove + self.config.remove_headers:
+            if h.lower() in headers:
+                del headers[h.lower()]
+        return headers
 
     def object_copy(self, src_uri, dst_uri, extra_headers = None):
         if src_uri.type != "s3":
@@ -610,22 +675,56 @@ class S3(object):
             raise ValueError("Expected URI type 's3', got '%s'" % dst_uri.type)
         headers = SortedDict(ignore_case = True)
         headers['x-amz-copy-source'] = "/%s/%s" % (src_uri.bucket(), self.urlencode_string(src_uri.object()))
-        ## TODO: For now COPY, later maybe add a switch?
         headers['x-amz-metadata-directive'] = "COPY"
         if self.config.acl_public:
             headers["x-amz-acl"] = "public-read"
         if self.config.reduced_redundancy:
             headers["x-amz-storage-class"] = "REDUCED_REDUNDANCY"
+        else:
+            headers["x-amz-storage-class"] = "STANDARD"
 
         ## Set server side encryption
         if self.config.server_side_encryption:
             headers["x-amz-server-side-encryption"] = "AES256"
 
         if extra_headers:
-            headers['x-amz-metadata-directive'] = "REPLACE"
             headers.update(extra_headers)
+
         request = self.create_request("OBJECT_PUT", uri = dst_uri, headers = headers)
         response = self.send_request(request)
+        return response
+        
+    def object_modify(self, src_uri, dst_uri, extra_headers = None):
+        if src_uri.type != "s3":
+            raise ValueError("Expected URI type 's3', got '%s'" % src_uri.type)
+        if dst_uri.type != "s3":
+            raise ValueError("Expected URI type 's3', got '%s'" % dst_uri.type)
+
+        info_response = self.object_info(src_uri)
+        headers = info_response['headers']
+        headers = self._sanitize_headers(headers)
+        acl = self.get_acl(src_uri)
+
+        headers['x-amz-copy-source'] = "/%s/%s" % (src_uri.bucket(), self.urlencode_string(src_uri.object()))
+        headers['x-amz-metadata-directive'] = "REPLACE"
+
+        # cannot change between standard and reduced redundancy with a REPLACE.
+
+        ## Set server side encryption
+        if self.config.server_side_encryption:
+            headers["x-amz-server-side-encryption"] = "AES256"
+
+        if extra_headers:
+            headers.update(extra_headers)
+
+        if self.config.mime_type:
+            headers["content-type"] = self.config.mime_type
+
+        request = self.create_request("OBJECT_PUT", uri = src_uri, headers = headers)
+        response = self.send_request(request)
+
+        acl_response = self.set_acl(src_uri, acl)
+
         return response
 
     def object_move(self, src_uri, dst_uri, extra_headers = None):
@@ -652,14 +751,20 @@ class S3(object):
         return acl
 
     def set_acl(self, uri, acl):
-        if uri.has_object():
-            request = self.create_request("OBJECT_PUT", uri = uri, extra = "?acl")
-        else:
-            request = self.create_request("BUCKET_CREATE", bucket = uri.bucket(), extra = "?acl")
+        # dreamhost doesn't support set_acl properly
+        if 'objects.dreamhost.com' in self.config.host_base:
+            return { 'status' : 501 } # not implemented
 
         body = str(acl)
         debug(u"set_acl(%s): acl-xml: %s" % (uri, body))
-        response = self.send_request(request, body)
+
+        headers = {'content-type': 'application/xml'}
+        if uri.has_object():
+            request = self.create_request("OBJECT_PUT", uri = uri, extra = "?acl", body = body)
+        else:
+            request = self.create_request("BUCKET_CREATE", bucket = uri.bucket(), extra = "?acl", body = body)
+
+        response = self.send_request(request)
         return response
 
     def get_policy(self, uri):
@@ -672,11 +777,8 @@ class S3(object):
         # TODO check policy is proper json string
         headers['content-type'] = 'application/json'
         request = self.create_request("BUCKET_CREATE", uri = uri,
-                                      extra = "?policy", headers=headers)
-        body = policy
-        debug(u"set_policy(%s): policy-json: %s" % (uri, body))
-        request.sign()
-        response = self.send_request(request, body=body)
+                                      extra = "?policy", headers=headers, body = policy)
+        response = self.send_request(request)
         return response
 
     def delete_policy(self, uri):
@@ -689,11 +791,9 @@ class S3(object):
         headers = SortedDict(ignore_case = True)
         headers['content-md5'] = compute_content_md5(policy)
         request = self.create_request("BUCKET_CREATE", uri = uri,
-                                      extra = "?lifecycle", headers=headers)
-        body = policy
-        debug(u"set_lifecycle_policy(%s): policy-xml: %s" % (uri, body))
-        request.sign()
-        response = self.send_request(request, body=body)
+                                      extra = "?lifecycle", headers=headers, body = policy)
+        debug(u"set_lifecycle_policy(%s): policy-xml: %s" % (uri))
+        response = self.send_request(request)
         return response
 
     def delete_lifecycle_policy(self, uri):
@@ -734,22 +834,24 @@ class S3(object):
         self.set_acl(uri, acl)
 
     def set_accesslog(self, uri, enable, log_target_prefix_uri = None, acl_public = False):
-        request = self.create_request("BUCKET_CREATE", bucket = uri.bucket(), extra = "?logging")
         accesslog = AccessLog()
         if enable:
             accesslog.enableLogging(log_target_prefix_uri)
             accesslog.setAclPublic(acl_public)
         else:
             accesslog.disableLogging()
+
         body = str(accesslog)
         debug(u"set_accesslog(%s): accesslog-xml: %s" % (uri, body))
+
+        request = self.create_request("BUCKET_CREATE", bucket = uri.bucket(), extra = "?logging", body = body)
         try:
-            response = self.send_request(request, body)
+            response = self.send_request(request)
         except S3Error, e:
             if e.info['Code'] == "InvalidTargetBucketForLogging":
                 info("Setting up log-delivery ACL for target bucket.")
                 self.set_accesslog_acl(S3Uri("s3://%s" % log_target_prefix_uri.bucket()))
-                response = self.send_request(request, body)
+                response = self.send_request(request)
             else:
                 raise
         return accesslog, response
@@ -806,7 +908,7 @@ class S3(object):
         debug("String '%s' encoded to '%s'" % (string, encoded))
         return encoded
 
-    def create_request(self, operation, uri = None, bucket = None, object = None, headers = None, extra = None, **params):
+    def create_request(self, operation, uri = None, bucket = None, object = None, headers = None, extra = None, body = "", **params):
         resource = { 'bucket' : None, 'uri' : "/" }
 
         if uri and (bucket or object):
@@ -825,7 +927,7 @@ class S3(object):
 
         method_string = S3.http_methods.getkey(S3.operations[operation] & S3.http_methods["MASK"])
 
-        request = S3Request(self, method_string, resource, headers, params)
+        request = S3Request(self, method_string, resource, headers, body, params)
 
         debug("CreateRequest: resource[uri]=" + resource['uri'])
         return request
@@ -834,19 +936,68 @@ class S3(object):
         # Wait a few seconds. The more it fails the more we wait.
         return (self._max_retries - retries + 1) * 3
 
-    def send_request(self, request, body = None, retries = _max_retries):
+    def _http_400_handler(self, request, response, fn, *args, **kwargs):
+        # AWS response AuthorizationHeaderMalformed means we sent the request to the wrong region
+        # get the right region out of the response and send it there.
+        message = 'Unknown error'
+        if 'data' in response and len(response['data']) > 0:
+            failureCode = getTextFromXml(response['data'], 'Code')
+            message = getTextFromXml(response['data'], 'Message')
+            if failureCode == 'AuthorizationHeaderMalformed':  # we sent the request to the wrong region
+                region = getTextFromXml(response['data'], 'Region')
+                if region is not None:
+                    S3Request.region_map[request.resource['bucket']] = region
+                    info('Forwarding request to %s' % region)
+                    return fn(*args, **kwargs)
+                else:
+                    message = u'Could not determine bucket location. Please consider using --region parameter.'
+
+            elif failureCode == 'InvalidRequest':
+                if message == 'The authorization mechanism you have provided is not supported. Please use AWS4-HMAC-SHA256.':
+                    debug(u'Endpoint requires signature v4')
+                    self.endpoint_requires_signature_v4 = True
+                    return fn(*args, **kwargs)
+
+            elif failureCode == 'InvalidArgument': # returned by DreamObjects on send_request and send_file,
+                                                   # which doesn't support signature v4. Retry with signature v2
+                if not request.use_signature_v2() and not self.fallback_to_signature_v2: # have not tried with v2 yet
+                    debug(u'Falling back to signature v2')
+                    self.fallback_to_signature_v2 = True
+                    return fn(*args, **kwargs)
+
+        else: # returned by DreamObjects on recv_file, which doesn't support signature v4. Retry with signature v2
+            if not request.use_signature_v2() and not self.fallback_to_signature_v2: # have not tried with v2 yet
+                debug(u'Falling back to signature v2')
+                self.fallback_to_signature_v2 = True
+                return fn(*args, **kwargs)
+
+        error(u"S3 error: %s" % message)
+        sys.exit(ExitCodes.EX_GENERAL)
+
+    def _http_403_handler(self, request, response, fn, *args, **kwargs):
+        message = 'Unknown error'
+        if 'data' in response and len(response['data']) > 0:
+            failureCode = getTextFromXml(response['data'], 'Code')
+            message = getTextFromXml(response['data'], 'Message')
+            if failureCode == 'AccessDenied':  # traditional HTTP 403
+                if message == 'AWS authentication requires a valid Date or x-amz-date header': # message from an Eucalyptus walrus server
+                    if not request.use_signature_v2() and not self.fallback_to_signature_v2: # have not tried with v2 yet
+                        debug(u'Falling back to signature v2')
+                        self.fallback_to_signature_v2 = True
+                        return fn(*args, **kwargs)
+
+        error(u"S3 error: %s" % message)
+        sys.exit(ExitCodes.EX_GENERAL)
+
+    def send_request(self, request, retries = _max_retries):
         method_string, resource, headers = request.get_triplet()
+
         debug("Processing request, please wait...")
-        if not headers.has_key('content-length'):
-            headers['content-length'] = body and len(body) or 0
         try:
-            # "Stringify" all headers
-            for header in headers.keys():
-                headers[header] = str(headers[header])
             conn = ConnMan.get(self.get_hostname(resource['bucket']))
             uri = self.format_uri(resource)
-            debug("Sending request method_string=%r, uri=%r, headers=%r, body=(%i bytes)" % (method_string, uri, headers, len(body or "")))
-            conn.c.request(method_string, uri, body, headers)
+            debug("Sending request method_string=%r, uri=%r, headers=%r, body=(%i bytes)" % (method_string, uri, headers, len(request.body or "")))
+            conn.c.request(method_string, uri, request.body, headers)
             response = {}
             http_response = conn.c.getresponse()
             response["status"] = http_response.status
@@ -867,17 +1018,24 @@ class S3(object):
                 warning("Retrying failed request: %s (%s)" % (resource['uri'], e))
                 warning("Waiting %d sec..." % self._fail_wait(retries))
                 time.sleep(self._fail_wait(retries))
-                return self.send_request(request, body, retries - 1)
+                return self.send_request(request, retries - 1)
             else:
                 raise S3RequestError("Request failed for: %s" % resource['uri'])
+
+        if response["status"] == 400:
+            return self._http_400_handler(request, response, self.send_request, request)
+        if response["status"] == 403:
+            return self._http_403_handler(request, response, self.send_request, request)
+        if response["status"] == 405: # Method Not Allowed.  Don't retry.
+            raise S3Error(response)
 
         if response["status"] == 307:
             ## RedirectPermanent
             redir_bucket = getTextFromXml(response['data'], ".//Bucket")
             redir_hostname = getTextFromXml(response['data'], ".//Endpoint")
             self.set_hostname(redir_bucket, redir_hostname)
-            warning("Redirected to: %s" % (redir_hostname))
-            return self.send_request(request, body)
+            info("Redirected to: %s" % (redir_hostname))
+            return self.send_request(request)
 
         if response["status"] >= 500:
             e = S3Error(response)
@@ -886,7 +1044,7 @@ class S3(object):
                 warning(unicode(e))
                 warning("Waiting %d sec..." % self._fail_wait(retries))
                 time.sleep(self._fail_wait(retries))
-                return self.send_request(request, body, retries - 1)
+                return self.send_request(request, retries - 1)
             else:
                 raise e
 
@@ -897,12 +1055,25 @@ class S3(object):
 
     def send_file(self, request, file, labels, buffer = '', throttle = 0, retries = _max_retries, offset = 0, chunk_size = -1):
         method_string, resource, headers = request.get_triplet()
+        if S3Request.region_map.get(request.resource['bucket'], None) is None:
+            s3_uri = S3Uri('s3://' + request.resource['bucket'])
+            region = self.get_bucket_location(s3_uri)
+            if region is not None:
+                S3Request.region_map[request.resource['bucket']] = region
+
         size_left = size_total = headers.get("content-length")
         if self.config.progress_meter:
             progress = self.config.progress_class(labels, size_total)
         else:
             info("Sending file '%s', please wait..." % file.name)
         timestamp_start = time.time()
+
+        if buffer:
+            sha256_hash = checksum_sha256_buffer(buffer, offset, size_total)
+        else:
+            sha256_hash = checksum_sha256_file(file.name, offset, size_total)
+        request.body = sha256_hash
+        method_string, resource, headers = request.get_triplet()
         try:
             conn = ConnMan.get(self.get_hostname(resource['bucket']))
             conn.c.putrequest(method_string, self.format_uri(resource))
@@ -986,8 +1157,13 @@ class S3(object):
             redir_bucket = getTextFromXml(response['data'], ".//Bucket")
             redir_hostname = getTextFromXml(response['data'], ".//Endpoint")
             self.set_hostname(redir_bucket, redir_hostname)
-            warning("Redirected to: %s" % (redir_hostname))
+            info("Redirected to: %s" % (redir_hostname))
             return self.send_file(request, file, labels, buffer, offset = offset, chunk_size = chunk_size)
+
+        if response["status"] == 400:
+            return self._http_400_handler(request, response, self.send_file, request, file, labels, buffer, offset = offset, chunk_size = chunk_size)
+        if response["status"] == 403:
+            return self._http_403_handler(request, response, self.send_file, request, file, labels, buffer, offset = offset, chunk_size = chunk_size)
 
         # S3 from time to time doesn't send ETag back in a response :-(
         # Force re-upload here.
@@ -1089,8 +1265,15 @@ class S3(object):
             redir_bucket = getTextFromXml(response['data'], ".//Bucket")
             redir_hostname = getTextFromXml(response['data'], ".//Endpoint")
             self.set_hostname(redir_bucket, redir_hostname)
-            warning("Redirected to: %s" % (redir_hostname))
+            info("Redirected to: %s" % (redir_hostname))
             return self.recv_file(request, stream, labels)
+
+        if response["status"] == 400:
+            return self._http_400_handler(request, response, self.recv_file, request, stream, labels)
+        if response["status"] == 403:
+            return self._http_403_handler(request, response, self.recv_file, request, stream, labels)
+        if response["status"] == 405: # Method Not Allowed.  Don't retry.
+            raise S3Error(response)
 
         if response["status"] < 200 or response["status"] > 299:
             raise S3Error(response)
@@ -1170,7 +1353,7 @@ class S3(object):
             except KeyError:
                 pass
 
-        response["md5match"] = md5_hash.find(response["md5"]) >= 0
+        response["md5match"] = response["md5"] in md5_hash
         response["elapsed"] = timestamp_end - timestamp_start
         response["size"] = current_position
         response["speed"] = response["elapsed"] and float(response["size"]) / response["elapsed"] or float(-1)

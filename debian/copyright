@@ -1,20 +1,22 @@
 Format: http://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: s3cmd
-Upstream-Contact: Michal Ludvig <michal@logix.cz>
-Source:http://s3tools.logix.cz/s3cmd
+Upstream-Contact: s3cmd-bugs <s3cmd-bugs@lists.sourceforge.net>
+Source: https://github.com/s3tools/s3cmd
 
 Files: *
-Copyright: 2007-2011 Michal Ludvig <michal@logix.cz>
-License: GPL-2
+Copyright: 2007-2015 TGRMN Software - http://www.tgrmn.com - and contributors
+License: GPL-2+
 
 Files: debian/*
 Copyright: 2007-2012 Mikhail Gusarov <dottedmag@debian.org>
-License: GPL-2
+           2015 Matt Domsch <matt@domsch.com>
+           2015 Gianfranco Costamagna <costamagnagianfranco@yahoo.it>
+License: GPL-2+
 
-License: GPL-2
+License: GPL-2+
  This program is free software; you can redistribute it and/or modify it under
  the terms of the GNU General Public License as published by the Free Software
- Foundation version 2 of the License.
+ Foundation version 2 of the License, or (at your option) any later version.
  .
  This program is distributed in the hope that it will be useful, but WITHOUT ANY
  WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A

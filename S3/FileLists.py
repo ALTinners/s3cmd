@@ -98,7 +98,8 @@ def handle_exclude_include_walk(root, dirs, files):
         debug(u"CHECK: %r" % d)
         excluded = False
         for r in cfg.exclude:
-            if not r.pattern.endswith(u'/'): continue # we only check for directories here
+            # python versions end their patterns (from globs) differently, test for both styles.
+            if not (r.pattern.endswith(u'\\/$') or r.pattern.endswith(u'\\/\\Z(?ms)')): continue # we only check for directory patterns here
             if r.search(d):
                 excluded = True
                 debug(u"EXCL-MATCH: '%s'" % (cfg.debug_exclude[r]))
@@ -106,7 +107,8 @@ def handle_exclude_include_walk(root, dirs, files):
         if excluded:
             ## No need to check for --include if not excluded
             for r in cfg.include:
-                if not r.pattern.endswith(u'/'): continue # we only check for directories here
+                # python versions end their patterns (from globs) differently, test for both styles.
+                if not (r.pattern.endswith(u'\\/$') or r.pattern.endswith(u'\\/\\Z(?ms)')): continue # we only check for directory patterns here
                 debug(u"INCL-TEST: %s ~ %s" % (d, r.pattern))
                 if r.search(d):
                     excluded = False
@@ -381,14 +383,14 @@ def fetch_remote_list(args, require_attribs = False, recursive = None, uri_param
             rem_list[key] = {
                 'size' : int(object['Size']),
                 'timestamp' : dateS3toUnix(object['LastModified']), ## Sadly it's upload time, not our lastmod time :-(
-                'md5' : object['ETag'][1:-1],
+                'md5' : object['ETag'].strip('"\''),
                 'object_key' : object['Key'],
                 'object_uri_str' : object_uri_str,
                 'base_uri' : remote_uri,
                 'dev' : None,
                 'inode' : None,
             }
-            if rem_list[key]['md5'].find("-") > 0: # always get it for multipart uploads
+            if '-' in rem_list[key]['md5']: # always get it for multipart uploads
                 _get_remote_attribs(S3Uri(object_uri_str), rem_list[key])
             md5 = rem_list[key]['md5']
             rem_list.record_md5(key, md5)
@@ -468,15 +470,17 @@ def compare_filelists(src_list, dst_list, src_remote, dst_remote, delay_updates 
             return False
 
         ## check size first
-        if 'size' in cfg.sync_checks and dst_list[file]['size'] != src_list[file]['size']:
-            debug(u"xfer: %s (size mismatch: src=%s dst=%s)" % (file, src_list[file]['size'], dst_list[file]['size']))
-            attribs_match = False
+        if 'size' in cfg.sync_checks:
+            if 'size' in dst_list[file] and 'size' in src_list[file]:
+                if dst_list[file]['size'] != src_list[file]['size']:
+                    debug(u"xfer: %s (size mismatch: src=%s dst=%s)" % (file, src_list[file]['size'], dst_list[file]['size']))
+                    attribs_match = False
 
         ## check md5
         compare_md5 = 'md5' in cfg.sync_checks
         # Multipart-uploaded files don't have a valid md5 sum - it ends with "...-nn"
         if compare_md5:
-            if (src_remote == True and src_list[file]['md5'].find("-") >= 0) or (dst_remote == True and dst_list[file]['md5'].find("-") >= 0):
+            if (src_remote == True and '-' in src_list[file]['md5']) or (dst_remote == True and '-' in dst_list[file]['md5']):
                 compare_md5 = False
                 info(u"disabled md5 check for %s" % file)
         if attribs_match and compare_md5:

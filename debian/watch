@@ -1,2 +1,2 @@
 version=3
-opts=uversionmangle=s/-(alpha|beta|pre|rc)/~$1/;s/-(speedup)/~$1/  http://sf.net/s3tools/s3cmd-(.*)\.tar\.gz
+opts=pgpsigurlmangle=s/$/.asc/ https://github.com/s3tools/s3cmd/releases .*/s3cmd-(\d\S*)\.tar\.gz

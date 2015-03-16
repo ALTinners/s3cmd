@@ -1,3 +1,25 @@
+s3cmd (1.5.2-1) experimental; urgency=medium
+
+  * Adopt package (Closes: #674916)
+
+  [ Matt Domsch ]
+  * New upstream release.
+  * Update watch file.
+  * Update homepage location.
+
+  [ Gianfranco Costamagna ]
+  * Change debian packaging to gpl-2+, to ease upstream patch forwarding.
+  * Remove old scripts from rules file.
+  * Add setuptools b-d, needed to build the package in a clean environment.
+  * Update compat level to 9, no changes required.
+  * Update std-version to 3.9.6, no changes required.
+  * Use pybuild to simplify packaging style.
+  * Remove s3cmd symlink.
+  * Set Python Applications Packaging Team as maintainer.
+  * Update VCS fields to git.
+
+ -- Gianfranco Costamagna <costamagnagianfranco@yahoo.it>  Mon, 16 Mar 2015 11:07:21 +0100
+
 s3cmd (1.5.0~rc1-2) unstable; urgency=low
 
   * Add missing python-dateutil, python-magic dependencies

@@ -1,19 +1,17 @@
-From 361afc19c34424ef08704afcb0b94c8374f58e87 Mon Sep 17 00:00:00 2001
-From: Mikhail Gusarov <dottedmag@dottedmag.net>
-Date: Tue, 2 Sep 2014 18:39:18 +0200
-Subject: [PATCH] Return non-zero code from 'put' command if some files failed
+Author: Mikhail Gusarov <dottedmag@dottedmag.net>
+Description: [PATCH] Return non-zero code from 'put' command if some files failed
  to upload
-
+Forwarded: https://github.com/s3tools/s3cmd/pull/507
 Debian bug: https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=669002
 ---
  s3cmd | 5 ++++-
  1 file changed, 4 insertions(+), 1 deletion(-)
 
-diff --git a/s3cmd b/s3cmd
-index 90d29cb..b1af648 100755
---- a/s3cmd
-+++ b/s3cmd
-@@ -361,6 +361,7 @@ def cmd_object_put(args):
+Index: s3cmd/s3cmd
+===================================================================
+--- s3cmd.orig/s3cmd	2015-03-18 11:54:56.630549438 +0100
++++ s3cmd/s3cmd	2015-03-18 11:54:56.626549422 +0100
+@@ -363,6 +363,7 @@
          return EX_OK
  
      seq = 0
@@ -21,7 +19,7 @@ index 90d29cb..b1af648 100755
      for key in local_list:
          seq += 1
  
-@@ -380,9 +381,11 @@ def cmd_object_put(args):
+@@ -382,9 +383,11 @@
              response = s3.object_put(full_name, uri_final, extra_headers, extra_label = seq_label)
          except S3UploadError, e:
              error(u"Upload of '%s' failed too many times. Skipping that file." % full_name_orig)
@@ -33,7 +31,7 @@ index 90d29cb..b1af648 100755
              continue
          if response is not None:
              speed_fmt = formatSize(response["speed"], human_readable = True, floating_point = True)
-@@ -396,7 +399,7 @@ def cmd_object_put(args):
+@@ -398,7 +401,7 @@
          if Config().encrypt and full_name != full_name_orig:
              debug(u"Removing temporary encrypted file: %s" % unicodise(full_name))
              os.remove(full_name)
@@ -42,6 +40,3 @@ index 90d29cb..b1af648 100755
  
  def cmd_object_get(args):
      cfg = Config()
--- 
-1.9.2
-
