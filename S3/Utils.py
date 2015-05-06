@@ -10,19 +10,24 @@ import string
 import random
 import rfc822
 try:
-	from hashlib import md5
+	from hashlib import md5, sha1
 except ImportError:
 	from md5 import md5
+	import sha as sha1
+import hmac
+import base64
 import errno
 
 from logging import debug, info, warning, error
 
 import Config
+import Exceptions
 
 try:
 	import xml.etree.ElementTree as ET
 except ImportError:
 	import elementtree.ElementTree as ET
+from xml.parsers.expat import ExpatError
 
 def parseNodes(nodes):
 	## WARNING: Ignores text nodes from mixed xml/text.
@@ -54,10 +59,14 @@ def stripNameSpace(xml):
 
 def getTreeFromXml(xml):
 	xml, xmlns = stripNameSpace(xml)
-	tree = ET.fromstring(xml)
-	if xmlns:
-		tree.attrib['xmlns'] = xmlns
-	return tree
+	try:
+		tree = ET.fromstring(xml)
+		if xmlns:
+			tree.attrib['xmlns'] = xmlns
+		return tree
+	except ExpatError, e:
+		error(e)
+		raise Exceptions.ParameterError("Bucket contains invalid filenames. Please run: s3cmd fixbucket s3://your-bucket/")
 	
 def getListFromXml(xml, node):
 	tree = getTreeFromXml(xml)
@@ -104,7 +113,7 @@ def appendXmlTextNode(tag_name, text, parent):
 	parent.append(xmlTextNode(tag_name, text))
 
 def dateS3toPython(date):
-	date = re.compile("\.\d\d\dZ").sub(".000Z", date)
+	date = re.compile("(\.\d*)?Z").sub(".000Z", date)
 	return time.strptime(date, "%Y-%m-%dT%H:%M:%S.000Z")
 
 def dateS3toUnix(date):
@@ -253,3 +262,31 @@ def unicodise_safe(string, encoding = None):
 
 	return unicodise(deunicodise(string, encoding), encoding).replace(u'\ufffd', '?')
 
+def replace_nonprintables(string):
+	"""
+	replace_nonprintables(string)
+
+	Replaces all non-printable characters 'ch' in 'string'
+	where ord(ch) <= 26 with ^@, ^A, ... ^Z
+	"""
+	new_string = ""
+	modified = 0
+	for c in string:
+		o = ord(c)
+		if (o <= 31):
+			new_string += "^" + chr(ord('@') + o)
+			modified += 1
+		elif (o == 127):
+			new_string += "^?"
+			modified += 1
+		else:
+			new_string += c
+	if modified and Config.Config().urlencoding_mode != "fixbucket":
+		warning("%d non-printable characters replaced in: %s" % (modified, new_string))
+	return new_string
+
+def sign_string(string_to_sign):
+	#debug("string_to_sign: %s" % string_to_sign)
+	signature = base64.encodestring(hmac.new(Config.Config().secret_key, string_to_sign, sha1).digest()).strip()
+	#debug("signature: %s" % signature)
+	return signature

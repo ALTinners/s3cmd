@@ -21,6 +21,7 @@ import traceback
 import codecs
 import locale
 import subprocess
+import htmlentitydefs
 
 from copy import copy
 from optparse import OptionParser, Option, OptionValueError, IndentedHelpFormatter
@@ -169,7 +170,7 @@ def cmd_bucket_delete(args):
 		except S3Error, e:
 			if e.info['Code'] == 'BucketNotEmpty' and (cfg.force or cfg.recursive):
 				warning(u"Bucket is not empty. Removing all the objects from it first. This may take some time...")
-				subcmd_object_del_uri(uri, recursive = True)
+				subcmd_object_del_uri(uri.uri(), recursive = True)
 				return _bucket_delete_one(uri)
 			elif S3.codes.has_key(e.info["Code"]):
 				error(S3.codes[e.info["Code"]] % uri.bucket())
@@ -187,7 +188,7 @@ def cmd_bucket_delete(args):
 
 def fetch_local_list(args, recursive = None):
 	local_uris = []
-	local_list = SortedDict()
+	local_list = SortedDict(ignore_case = False)
 	single_file = False
 
 	if type(args) not in (list, tuple):
@@ -220,7 +221,7 @@ def fetch_local_list(args, recursive = None):
 
 def fetch_remote_list(args, require_attribs = False, recursive = None):
 	remote_uris = []
-	remote_list = SortedDict()
+	remote_list = SortedDict(ignore_case = False)
 
 	if type(args) not in (list, tuple):
 		args = [args]
@@ -286,9 +287,11 @@ def cmd_object_put(args):
 	if len(args) == 0:
 		raise ParameterError("Nothing to upload. Expecting a local file or directory and a S3 URI destination.")
 
-	destination_base = args.pop()
-	if S3Uri(destination_base).type != 's3':
-		raise ParameterError("Destination must be S3Uri. Got: %s" % destination_base)
+	## Normalize URI to convert s3://bkt to s3://bkt/ (trailing slash)
+	destination_base_uri = S3Uri(args.pop())
+	if destination_base_uri.type != 's3':
+		raise ParameterError("Destination must be S3Uri. Got: %s" % destination_base_uri)
+	destination_base = str(destination_base_uri)
 
 	if len(args) == 0:
 		raise ParameterError("Nothing to upload. Expecting a local file or directory.")
@@ -334,7 +337,7 @@ def cmd_object_put(args):
 		try:
 			response = s3.object_put(full_name, uri_final, extra_headers, extra_label = seq_label)
 		except S3UploadError, e:
-			error(u"Upload of '%s' failed too many times. Skipping that file." % real_filename)
+			error(u"Upload of '%s' failed too many times. Skipping that file." % full_name_orig)
 			continue
 		except InvalidFileError, e:
 			warning(u"File can not be uploaded: %s" % e)
@@ -481,62 +484,102 @@ def cmd_object_get(args):
 				(uri, destination, response["size"], response["elapsed"], speed_fmt[0], speed_fmt[1]))
 
 def cmd_object_del(args):
-	while (len(args)):
-		uri_arg = args.pop(0)
-		uri = S3Uri(uri_arg)
+	for uri_str in args:
+		uri = S3Uri(uri_str)
 		if uri.type != "s3":
-			raise ParameterError("Expecting S3 URI instead of '%s'" % uri_arg)
+			raise ParameterError("Expecting S3 URI instead of '%s'" % uri_str)
 		if not uri.has_object():
 			if Config().recursive and not Config().force:
-				raise ParameterError("Please use --force to delete ALL contents of %s" % uri)
+				raise ParameterError("Please use --force to delete ALL contents of %s" % uri_str)
 			elif not Config().recursive:
-				raise ParameterError("File name required, not only the bucket name")
-		subcmd_object_del_uri(uri)
+				raise ParameterError("File name required, not only the bucket name. Alternatively use --recursive")
+		subcmd_object_del_uri(uri_str)
 
-def subcmd_object_del_uri(uri, recursive = None):
-	s3 = S3(Config())
+def subcmd_object_del_uri(uri_str, recursive = None):
+	s3 = S3(cfg)
+
 	if recursive is None:
 		recursive = cfg.recursive
-	uri_list = []
-	if recursive:
-		filelist = _get_filelist_remote(uri)
-		uri_base = 's3://' + uri.bucket() + "/"
-		for idx in filelist:
-			object = filelist[idx]
-			debug(u"Adding URI " + uri_base + object['object_key'])
-			uri_list.append(S3Uri(uri_base + object['object_key']))
+
+	remote_list = fetch_remote_list(uri_str, require_attribs = False, recursive = recursive)
+	remote_list, exclude_list = _filelist_filter_exclude_include(remote_list)
+
+	remote_count = len(remote_list)
+
+	info(u"Summary: %d remote files to delete" % remote_count)
+
+	if cfg.dry_run:
+		for key in exclude_list:
+			output(u"exclude: %s" % unicodise(key))
+		for key in remote_list:
+			output(u"delete: %s" % remote_list[key]['object_uri_str'])
+
+		warning(u"Exitting now because of --dry-run")
+		return
+
+	for key in remote_list:
+		item = remote_list[key]
+		response = s3.object_delete(S3Uri(item['object_uri_str']))
+		output(u"File %s deleted" % item['object_uri_str'])
+
+def subcmd_cp_mv(args, process_fce, action_str, message):
+	if len(args) < 2:
+		raise ParameterError("Expecting two or more S3 URIs for " + action_str)
+	dst_base_uri = S3Uri(args.pop())
+	if dst_base_uri.type != "s3":
+		raise ParameterError("Destination must be S3 URI. To download a file use 'get' or 'sync'.")
+	destination_base = dst_base_uri.uri()
+
+	remote_list = fetch_remote_list(args, require_attribs = False)
+	remote_list, exclude_list = _filelist_filter_exclude_include(remote_list)
+
+	remote_count = len(remote_list)
+
+	info(u"Summary: %d remote files to %s" % (remote_count, action_str))
+
+	if cfg.recursive:
+		if not destination_base.endswith("/"):
+			destination_base += "/"
+		for key in remote_list:
+			remote_list[key]['dest_name'] = destination_base + key
 	else:
-		uri_list.append(uri)
-	for _uri in uri_list:
-		response = s3.object_delete(_uri)
-		output(u"File %s deleted" % _uri)
+		key = remote_list.keys()[0]
+		if destination_base.endswith("/"):
+			remote_list[key]['dest_name'] = destination_base + key
+		else:
+			remote_list[key]['dest_name'] = destination_base
 
-def subcmd_cp_mv(args, process_fce, message):
-	src_uri = S3Uri(args.pop(0))
-	dst_uri = S3Uri(args.pop(0))
+	if cfg.dry_run:
+		for key in exclude_list:
+			output(u"exclude: %s" % unicodise(key))
+		for key in remote_list:
+			output(u"%s: %s -> %s" % (action_str, remote_list[key]['object_uri_str'], remote_list[key]['dest_name']))
 
-	if len(args): 
-		raise ParameterError("Too many parameters! Expected: %s" % commands['cp']['param']) 
+		warning(u"Exitting now because of --dry-run")
+		return
 
-	if src_uri.type != "s3" or dst_uri.type != "s3": 
-		raise ParameterError("Parameters are not URIs! Expected: %s" % commands['cp']['param']) 
+	seq = 0
+	for key in remote_list:
+		seq += 1
+		seq_label = "[%d of %d]" % (seq, remote_count)
 
-	if dst_uri.object() == "":
-		dst_uri = S3Uri(dst_uri.uri() + src_uri.object())
+		item = remote_list[key]
+		src_uri = S3Uri(item['object_uri_str'])
+		dst_uri = S3Uri(item['dest_name'])
 
-	extra_headers = copy(cfg.extra_headers)
-	response = process_fce(src_uri, dst_uri, extra_headers) 
-	output(message % { "src" : src_uri, "dst" : dst_uri})
-	if Config().acl_public:
-		output(u"Public URL is: %s" % dst_uri.public_url())
+		extra_headers = copy(cfg.extra_headers)
+		response = process_fce(src_uri, dst_uri, extra_headers) 
+		output(message % { "src" : src_uri, "dst" : dst_uri })
+		if Config().acl_public:
+			info(u"Public URL is: %s" % dst_uri.public_url())
 
 def cmd_cp(args):
 	s3 = S3(Config())
-	subcmd_cp_mv(args, s3.object_copy, "File %(src)s copied to %(dst)s")
+	subcmd_cp_mv(args, s3.object_copy, "copy", "File %(src)s copied to %(dst)s")
 
 def cmd_mv(args):
 	s3 = S3(Config())
-	subcmd_cp_mv(args, s3.object_move, "File %(src)s moved to %(dst)s")
+	subcmd_cp_mv(args, s3.object_move, "move", "File %(src)s moved to %(dst)s")
 
 def cmd_info(args):
 	s3 = S3(Config())
@@ -584,7 +627,7 @@ def _get_filelist_local(local_uri):
 		local_path = deunicodise(local_uri.dirname())
 		filelist = [( local_path, [], [deunicodise(local_uri.basename())] )]
 		single_file = True
-	loc_list = SortedDict()
+	loc_list = SortedDict(ignore_case = False)
 	for root, dirs, files in filelist:
 		rel_root = root.replace(local_path, local_base, 1)
 		for f in files:
@@ -596,6 +639,8 @@ def _get_filelist_local(local_uri):
 				## for now skip over
 				continue
 			relative_file = unicodise(os.path.join(rel_root, f))
+			if cfg.urlencoding_mode == "normal":
+				relative_file = replace_nonprintables(relative_file)
 			if relative_file.startswith('./'):
 				relative_file = relative_file[2:]
 			sr = os.stat_result(os.lstat(full_name))
@@ -635,7 +680,7 @@ def _get_filelist_remote(remote_uri, recursive = True):
 		rem_base = rem_base[:rem_base.rfind('/')+1]
 		remote_uri = S3Uri("s3://%s/%s" % (remote_uri.bucket(), rem_base))
 	rem_base_len = len(rem_base)
-	rem_list = SortedDict()
+	rem_list = SortedDict(ignore_case = False)
 	break_now = False
 	for object in response['list']:
 		if object['Key'] == rem_base_original and object['Key'][-1] != os.path.sep:
@@ -662,7 +707,7 @@ def _get_filelist_remote(remote_uri, recursive = True):
 def _filelist_filter_exclude_include(src_list):
 	info(u"Applying --exclude/--include")
 	cfg = Config()
-	exclude_list = SortedDict()
+	exclude_list = SortedDict(ignore_case = False)
 	for file in src_list.keys():
 		debug(u"CHECK: %s" % file)
 		excluded = False
@@ -691,7 +736,7 @@ def _filelist_filter_exclude_include(src_list):
 def _compare_filelists(src_list, dst_list, src_is_local_and_dst_is_remote):
 	info(u"Verifying attributes...")
 	cfg = Config()
-	exists_list = SortedDict()
+	exists_list = SortedDict(ignore_case = False)
 
 	for file in src_list.keys():
 		debug(u"CHECK: %s" % file)
@@ -914,7 +959,12 @@ def cmd_sync_local2remote(args):
 		error(u"or disable encryption with --no-encrypt parameter.")
 		sys.exit(1)
 
-	destination_base = args[-1]
+	## Normalize URI to convert s3://bkt to s3://bkt/ (trailing slash)
+	destination_base_uri = S3Uri(args[-1])
+	if destination_base_uri.type != 's3':
+		raise ParameterError("Destination must be S3Uri. Got: %s" % destination_base_uri)
+	destination_base = str(destination_base_uri)
+
 	local_list, single_file_local = fetch_local_list(args[:-1], recursive = True)
 	remote_list = fetch_remote_list(destination_base, recursive = True, require_attribs = True)
 
@@ -1026,7 +1076,21 @@ def cmd_setacl(args):
 	set_to_acl = cfg.acl_public and "Public" or "Private"
 
 	remote_list = fetch_remote_list(args)
+	remote_list, exclude_list = _filelist_filter_exclude_include(remote_list)
+
 	remote_count = len(remote_list)
+
+	info(u"Summary: %d remote files to update" % remote_count)
+
+	if cfg.dry_run:
+		for key in exclude_list:
+			output(u"exclude: %s" % unicodise(key))
+		for key in remote_list:
+			output(u"setacl: %s" % remote_list[key]['object_uri_str'])
+
+		warning(u"Exitting now because of --dry-run")
+		return
+
 	seq = 0
 	for key in remote_list:
 		seq += 1
@@ -1047,6 +1111,77 @@ def cmd_setacl(args):
 		retsponse = s3.set_acl(uri, acl)
 		if retsponse['status'] == 200:
 			output(u"%s: ACL set to %s  %s" % (uri, set_to_acl, seq_label))
+
+def cmd_sign(args):
+	string_to_sign = args.pop()
+	debug("string-to-sign: %r" % string_to_sign)
+	signature = Utils.sign_string(string_to_sign)
+	output("Signature: %s" % signature)
+
+def cmd_fixbucket(args):
+	def _unescape(text):
+		##
+		# Removes HTML or XML character references and entities from a text string.
+		#
+		# @param text The HTML (or XML) source text.
+		# @return The plain text, as a Unicode string, if necessary.
+		# 
+		# From: http://effbot.org/zone/re-sub.htm#unescape-html
+		def _unescape_fixup(m):
+			text = m.group(0)
+			if not htmlentitydefs.name2codepoint.has_key('apos'):
+				htmlentitydefs.name2codepoint['apos'] = ord("'")
+			if text[:2] == "&#":
+				# character reference
+				try:
+					if text[:3] == "&#x":
+						return unichr(int(text[3:-1], 16))
+					else:
+						return unichr(int(text[2:-1]))
+				except ValueError:
+					pass
+			else:
+				# named entity
+				try:
+					text = unichr(htmlentitydefs.name2codepoint[text[1:-1]])
+				except KeyError:
+					pass
+			return text # leave as is
+		return re.sub("&#?\w+;", _unescape_fixup, text)
+
+	cfg.urlencoding_mode = "fixbucket"
+	s3 = S3(cfg)
+
+	count = 0
+	for arg in args:
+		culprit = S3Uri(arg)
+		if culprit.type != "s3":
+			raise ParameterError("Expecting S3Uri instead of: %s" % arg)
+		response = s3.bucket_list_noparse(culprit.bucket(), culprit.object(), recursive = True)
+		r_xent = re.compile("&#x[\da-fA-F]+;")
+		keys = re.findall("<Key>(.*?)</Key>", response['data'], re.MULTILINE)
+		debug("Keys: %r" % keys)
+		for key in keys:
+			if r_xent.search(key):
+				info("Fixing: %s" % key)
+				debug("Step 1: Transforming %s" % key)
+				key_bin = _unescape(key)
+				debug("Step 2:       ... to %s" % key_bin)
+				key_new = replace_nonprintables(key_bin)
+				debug("Step 3:  ... then to %s" % key_new)
+				src = S3Uri("s3://%s/%s" % (culprit.bucket(), key_bin))
+				dst = S3Uri("s3://%s/%s" % (culprit.bucket(), key_new))
+				resp_move = s3.object_move(src, dst)
+				if resp_move['status'] == 200:
+					output("File %r renamed to %s" % (key_bin, key_new))
+					count += 1
+				else:
+					error("Something went wrong for: %r" % key)
+					error("Please report the problem to s3tools-bugs@lists.sourceforge.net")
+	if count > 0:
+		warning("Fixed %d files' names. Their ACL were reset to Private." % count)
+		warning("Use 's3cmd setacl --acl-public s3://...' to make")
+		warning("them publicly readable if required.")
 
 def resolve_list(lst, args):
 	retval = []
@@ -1281,6 +1416,9 @@ def get_commands_list():
 	{"cmd":"cp", "label":"Copy object", "param":"s3://BUCKET1/OBJECT1 s3://BUCKET2[/OBJECT2]", "func":cmd_cp, "argc":2},
 	{"cmd":"mv", "label":"Move object", "param":"s3://BUCKET1/OBJECT1 s3://BUCKET2[/OBJECT2]", "func":cmd_mv, "argc":2},
 	{"cmd":"setacl", "label":"Modify Access control list for Bucket or Files", "param":"s3://BUCKET[/OBJECT]", "func":cmd_setacl, "argc":1},
+	{"cmd":"sign", "label":"Sign arbitrary string using the secret key", "param":"STRING-TO-SIGN", "func":cmd_sign, "argc":1},
+	{"cmd":"fixbucket", "label":"Fix invalid file names in a bucket", "param":"s3://BUCKET[/PREFIX]", "func":cmd_fixbucket, "argc":1},
+
 	## CloudFront commands
 	{"cmd":"cflist", "label":"List CloudFront distribution points", "param":"", "func":CfCmd.info, "argc":0},
 	{"cmd":"cfinfo", "label":"Display CloudFront distribution point parameters", "param":"[cf://DIST_ID]", "func":CfCmd.info, "argc":0},
@@ -1374,6 +1512,7 @@ def main():
 	optparser.add_option(      "--add-header", dest="add_header", action="append", metavar="NAME:VALUE", help="Add a given HTTP header to the upload request. Can be used multiple times. For instance set 'Expires' or 'Cache-Control' headers (or both) using this options if you like.")
 
 	optparser.add_option(      "--encoding", dest="encoding", metavar="ENCODING", help="Override autodetected terminal and filesystem encoding (character set). Autodetected: %s" % preferred_encoding)
+	optparser.add_option(      "--verbatim", dest="urlencoding_mode", action="store_const", const="verbatim", help="Use the S3 name as given on the command line. No pre-processing, encoding, etc. Use with caution!")
 
 	optparser.add_option(      "--list-md5", dest="list_md5", action="store_true", help="Include MD5 sums in bucket listings (only for 'ls' command).")
 	optparser.add_option("-H", "--human-readable-sizes", dest="human_readable_sizes", action="store_true", help="Print sizes in human readable form (eg 1kB instead of 1234).")
@@ -1544,36 +1683,7 @@ def main():
 		error(u"S3 error: %s" % e)
 		sys.exit(1)
 
-if __name__ == '__main__':
-	try:
-		## Our modules
-		## Keep them in try/except block to 
-		## detect any syntax errors in there
-		from S3 import PkgInfo
-		from S3.S3 import *
-		from S3.Config import Config
-		from S3.S3Uri import *
-		from S3 import Utils
-		from S3.Exceptions import *
-		from S3.Utils import unicodise
-		from S3.Progress import Progress
-		from S3.CloudFront import Cmd as CfCmd
-
-		main()
-		sys.exit(0)
-
-	except ParameterError, e:
-		error(u"Parameter problem: %s" % e)
-		sys.exit(1)
-
-	except SystemExit, e:
-		sys.exit(e.code)
-
-	except KeyboardInterrupt:
-		sys.stderr.write("See ya!\n")
-		sys.exit(1)
-
-	except Exception, e:
+def report_exception(e):
 		sys.stderr.write("""
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     An unexpected error has occurred.
@@ -1590,15 +1700,16 @@ if __name__ == '__main__':
 			sys.stderr.write("S3cmd:   %s\n" % PkgInfo.version)
 		except NameError:
 			sys.stderr.write("S3cmd:   unknown version. Module import problem?\n")
-		sys.stderr.write("Python:  %s\n" % sys.version.replace('\n', ' '))
 		sys.stderr.write("\n")
 		sys.stderr.write(unicode(tb, errors="replace"))
+
 		if type(e) == ImportError:
 			sys.stderr.write("\n")
 			sys.stderr.write("Your sys.path contains these entries:\n")
 			for path in sys.path:
 				sys.stderr.write(u"\t%s\n" % path)
-			sys.stderr.write("Now the question is where has S3/S3.py been installed?\n")
+			sys.stderr.write("Now the question is where have the s3cmd modules been installed?\n")
+
 		sys.stderr.write("""
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     An unexpected error has occurred.
@@ -1606,4 +1717,40 @@ if __name__ == '__main__':
    s3tools-bugs@lists.sourceforge.net
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 """)
+
+if __name__ == '__main__':
+	try:
+		## Our modules
+		## Keep them in try/except block to 
+		## detect any syntax errors in there
+		from S3.Exceptions import *
+		from S3 import PkgInfo
+		from S3.S3 import *
+		from S3.Config import Config
+		from S3.S3Uri import *
+		from S3 import Utils
+		from S3.Utils import unicodise
+		from S3.Progress import Progress
+		from S3.CloudFront import Cmd as CfCmd
+
+		main()
+		sys.exit(0)
+
+	except ImportError, e:
+		report_exception(e)
+		sys.exit(1)
+		
+	except ParameterError, e:
+		error(u"Parameter problem: %s" % e)
+		sys.exit(1)
+
+	except SystemExit, e:
+		sys.exit(e.code)
+
+	except KeyboardInterrupt:
+		sys.stderr.write("See ya!\n")
+		sys.exit(1)
+
+	except Exception, e:
+		report_exception(e)
 		sys.exit(1)

@@ -1,3 +1,23 @@
+s3cmd 0.9.9.91 -  2009-10-08
+==============
+* Fixed invalid reference to a variable in failed upload handling.
+
+s3cmd 0.9.9.90 -  2009-10-06
+==============
+* New command 'sign' for signing e.g. POST upload policies.
+* Fixed handling of filenames that differ only in 
+  capitalisation (eg blah.txt vs Blah.TXT).
+* Added --verbatim mode, preventing most filenames 
+  pre-processing. Good for fixing unreadable buckets.
+* Added --recursive support for [cp] and [mv], including
+  multiple-source arguments, --include/--exclude, --dry-run, etc.
+* Added --exclude/--include and --dry-run for [del], [setacl].
+* Neutralise characters that are invalid in XML to avoid ExpatErrors.
+  http://boodebr.org/main/python/all-about-python-and-unicode
+* New command [fixbucket] for for fixing invalid object names
+  in a given Bucket. For instance names with &#x08; in them
+  (not sure how people manage to upload them but they do).
+
 s3cmd 0.9.9   -   2009-02-17
 ===========
 New commands:
