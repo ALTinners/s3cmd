@@ -6,6 +6,7 @@
 import logging
 from logging import debug, info, warning, error
 import re
+import Progress
 
 class Config(object):
 	_instance = None
@@ -16,11 +17,18 @@ class Config(object):
 	host_base = "s3.amazonaws.com"
 	host_bucket = "%(bucket)s.s3.amazonaws.com"
 	simpledb_host = "sdb.amazonaws.com"
+	cloudfront_host = "cloudfront.amazonaws.com"
+	cloudfront_resource = "/2008-06-30/distribution"
 	verbosity = logging.WARNING
+	progress_meter = True
+	progress_class = Progress.ProgressCR
 	send_chunk = 4096
 	recv_chunk = 4096
 	human_readable_sizes = False
 	force = False
+	get_continue = False
+	skip_existing = False
+	recursive = False
 	acl_public = False
 	proxy_host = ""
 	proxy_port = 3128
@@ -47,12 +55,17 @@ class Config(object):
 	use_https = False
 	bucket_location = "US"
 	default_mime_type = "binary/octet-stream"
-	guess_mime_type = False
+	guess_mime_type = True
 	debug_syncmatch = False
+	# List of checks to be performed for 'sync'
+	sync_checks = ['size', 'md5']	# 'weak-timestamp'
 	# List of compiled REGEXPs
 	exclude = []
+	include = []
 	# Dict mapping compiled REGEXPs back to their textual form
 	debug_exclude = {}
+	debug_include = {}
+	encoding = "utf-8"
 
 	## Creating a singleton
 	def __new__(self, configfile = None):
@@ -119,7 +132,7 @@ class ConfigParser(object):
 		self.parse_file(file, sections)
 	
 	def parse_file(self, file, sections = []):
-		info("ConfigParser: Reading file '%s'" % file)
+		debug("ConfigParser: Reading file '%s'" % file)
 		if type(sections) != type([]):
 			sections = [sections]
 		in_our_section = True

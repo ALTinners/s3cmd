@@ -6,20 +6,26 @@
 import sys
 import os, os.path
 import base64
-import md5
-import sha
-import hmac
+import time
 import httplib
 import logging
 import mimetypes
 from logging import debug, info, warning, error
 from stat import ST_SIZE
 
+try:
+	from hashlib import md5, sha1
+except ImportError:
+	from md5 import md5
+	import sha as sha1
+import hmac
+
 from Utils import *
 from SortedDict import SortedDict
 from BidirMap import BidirMap
 from Config import Config
 from Exceptions import *
+from ACL import ACL
 
 class S3(object):
 	http_methods = BidirMap(
@@ -57,6 +63,9 @@ class S3(object):
 
 	## S3 sometimes sends HTTP-307 response 
 	redir_map = {}
+
+	## Maximum attempts of re-issuing failed requests
+	_max_retries = 5
 
 	def __init__(self, config):
 		self.config = config
@@ -101,7 +110,7 @@ class S3(object):
 		response["list"] = getListFromXml(response["data"], "Bucket")
 		return response
 	
-	def bucket_list(self, bucket, prefix = None):
+	def bucket_list(self, bucket, prefix = None, recursive = None):
 		def _list_truncated(data):
 			## <IsTruncated> can either be "true" or "false" or be missing completely
 			is_truncated = getTextFromXml(data, ".//IsTruncated") or "false"
@@ -110,20 +119,28 @@ class S3(object):
 		def _get_contents(data):
 			return getListFromXml(data, "Contents")
 
-		prefix = self.urlencode_string(prefix)
-		request = self.create_request("BUCKET_LIST", bucket = bucket, prefix = prefix)
+		def _get_common_prefixes(data):
+			return getListFromXml(data, "CommonPrefixes")
+
+		uri_params = {}
+		if prefix:
+			uri_params['prefix'] = self.urlencode_string(prefix)
+		if not self.config.recursive and not recursive:
+			uri_params['delimiter'] = "/"
+		request = self.create_request("BUCKET_LIST", bucket = bucket, **uri_params)
 		response = self.send_request(request)
 		#debug(response)
 		list = _get_contents(response["data"])
+		prefixes = _get_common_prefixes(response["data"])
 		while _list_truncated(response["data"]):
-			marker = list[-1]["Key"]
-			info("Listing continues after '%s'" % marker)
-			request = self.create_request("BUCKET_LIST", bucket = bucket,
-			                              prefix = prefix, 
-			                              marker = self.urlencode_string(marker))
+			uri_params['marker'] = self.urlencode_string(list[-1]["Key"])
+			debug("Listing continues after '%s'" % uri_params['marker'])
+			request = self.create_request("BUCKET_LIST", bucket = bucket, **uri_params)
 			response = self.send_request(request)
 			list += _get_contents(response["data"])
+			prefixes += _get_common_prefixes(response["data"])
 		response['list'] = list
+		response['common_prefixes'] = prefixes
 		return response
 
 	def bucket_create(self, bucket, bucket_location = None):
@@ -155,14 +172,19 @@ class S3(object):
 		response['bucket-location'] = getTextFromXml(response['data'], "LocationConstraint") or "any"
 		return response
 
-	def object_put(self, filename, bucket, object, extra_headers = None):
+	def object_put(self, filename, uri, extra_headers = None, extra_label = ""):
+		# TODO TODO
+		# Make it consistent with stream-oriented object_get()
+		if uri.type != "s3":
+			raise ValueError("Expected URI type 's3', got '%s'" % uri.type)
+
 		if not os.path.isfile(filename):
-			raise InvalidFileError("%s is not a regular file" % filename)
+			raise InvalidFileError(u"%s is not a regular file" % unicodise(filename))
 		try:
 			file = open(filename, "rb")
 			size = os.stat(filename)[ST_SIZE]
 		except IOError, e:
-			raise InvalidFileError("%s: %s" % (filename, e.strerror))
+			raise InvalidFileError(u"%s: %s" % (unicodise(filename), e.strerror))
 		headers = SortedDict()
 		if extra_headers:
 			headers.update(extra_headers)
@@ -176,57 +198,74 @@ class S3(object):
 		headers["content-type"] = content_type
 		if self.config.acl_public:
 			headers["x-amz-acl"] = "public-read"
-		request = self.create_request("OBJECT_PUT", bucket = bucket, object = object, headers = headers)
-		response = self.send_file(request, file)
+		request = self.create_request("OBJECT_PUT", uri = uri, headers = headers)
+		labels = { 'source' : unicodise(filename), 'destination' : unicodise(uri.uri()), 'extra' : extra_label }
+		response = self.send_file(request, file, labels)
 		return response
 
-	def object_get_uri(self, uri, stream):
+	def object_get(self, uri, stream, start_position = 0, extra_label = ""):
 		if uri.type != "s3":
 			raise ValueError("Expected URI type 's3', got '%s'" % uri.type)
-		request = self.create_request("OBJECT_GET", bucket = uri.bucket(), object = uri.object())
-		response = self.recv_file(request, stream)
+		request = self.create_request("OBJECT_GET", uri = uri)
+		labels = { 'source' : unicodise(uri.uri()), 'destination' : unicodise(stream.name), 'extra' : extra_label }
+		response = self.recv_file(request, stream, labels, start_position)
 		return response
 
-	def object_delete(self, bucket, object):
-		request = self.create_request("OBJECT_DELETE", bucket = bucket, object = object)
+	def object_delete(self, uri):
+		if uri.type != "s3":
+			raise ValueError("Expected URI type 's3', got '%s'" % uri.type)
+		request = self.create_request("OBJECT_DELETE", uri = uri)
 		response = self.send_request(request)
 		return response
 
-	def object_put_uri(self, filename, uri, extra_headers = None):
-		# TODO TODO
-		# Make it consistent with stream-oriented object_get_uri()
-		if uri.type != "s3":
-			raise ValueError("Expected URI type 's3', got '%s'" % uri.type)
-		return self.object_put(filename, uri.bucket(), uri.object(), extra_headers)
+	def object_copy(self, src_uri, dst_uri, extra_headers = None):
+		if src_uri.type != "s3":
+			raise ValueError("Expected URI type 's3', got '%s'" % src_uri.type)
+		if dst_uri.type != "s3":
+			raise ValueError("Expected URI type 's3', got '%s'" % dst_uri.type)
+		headers = SortedDict()
+		headers['x-amz-copy-source'] = "/%s/%s" % (src_uri.bucket(), self.urlencode_string(src_uri.object()))
+		if self.config.acl_public:
+			headers["x-amz-acl"] = "public-read"
+		if extra_headers:
+			headers.update(extra_headers)
+		request = self.create_request("OBJECT_PUT", uri = dst_uri, headers = headers)
+		response = self.send_request(request)
+		return response
 
-	def object_delete_uri(self, uri):
-		if uri.type != "s3":
-			raise ValueError("Expected URI type 's3', got '%s'" % uri.type)
-		return self.object_delete(uri.bucket(), uri.object())
+	def object_move(self, src_uri, dst_uri, extra_headers = None):
+		response_copy = self.object_copy(src_uri, dst_uri, extra_headers)
+		debug("Object %s copied to %s" % (src_uri, dst_uri))
+		if getRootTagName(response_copy["data"]) == "CopyObjectResult":
+			response_delete = self.object_delete(src_uri)
+			debug("Object %s deleted" % src_uri)
+		return response_copy
 
 	def object_info(self, uri):
-		request = self.create_request("OBJECT_HEAD", bucket = uri.bucket(), object = uri.object())
+		request = self.create_request("OBJECT_HEAD", uri = uri)
 		response = self.send_request(request)
 		return response
 
 	def get_acl(self, uri):
 		if uri.has_object():
-			request = self.create_request("OBJECT_GET", bucket = uri.bucket(), object = uri.object(), extra = "?acl")
+			request = self.create_request("OBJECT_GET", uri = uri, extra = "?acl")
 		else:
 			request = self.create_request("BUCKET_LIST", bucket = uri.bucket(), extra = "?acl")
-		acl = {}
+
 		response = self.send_request(request)
-		grants = getListFromXml(response['data'], "Grant")
-		for grant in grants:
-			if grant['Grantee'][0].has_key('DisplayName'):
-				user = grant['Grantee'][0]['DisplayName']
-			if grant['Grantee'][0].has_key('URI'):
-				user = grant['Grantee'][0]['URI']
-				if user == 'http://acs.amazonaws.com/groups/global/AllUsers':
-					user = "*anon*"
-			perm = grant['Permission']
-			acl[user] = perm
+		acl = ACL(response['data'])
 		return acl
+
+	def set_acl(self, uri, acl):
+		if uri.has_object():
+			request = self.create_request("OBJECT_PUT", uri = uri, extra = "?acl")
+		else:
+			request = self.create_request("BUCKET_CREATE", bucket = uri.bucket(), extra = "?acl")
+
+		body = str(acl)
+		debug(u"set_acl(%s): acl-xml: %s" % (uri, body))
+		response = self.send_request(request, body)
+		return response
 
 	## Low level methods
 	def urlencode_string(self, string):
@@ -268,8 +307,16 @@ class S3(object):
 		debug("String '%s' encoded to '%s'" % (string, encoded))
 		return encoded
 
-	def create_request(self, operation, bucket = None, object = None, headers = None, extra = None, **params):
+	def create_request(self, operation, uri = None, bucket = None, object = None, headers = None, extra = None, **params):
 		resource = { 'bucket' : None, 'uri' : "/" }
+
+		if uri and (bucket or object):
+			raise ValueError("Both 'uri' and either 'bucket' or 'object' parameters supplied")
+		## If URI is given use that instead of bucket/object parameters
+		if uri:
+			bucket = uri.bucket()
+			object = uri.has_object() and uri.object() or None
+
 		if bucket:
 			resource['bucket'] = str(bucket)
 			if object:
@@ -302,9 +349,13 @@ class S3(object):
 		debug("CreateRequest: resource[uri]=" + resource['uri'])
 		return (method_string, resource, headers)
 	
-	def send_request(self, request, body = None, retries = 5):
+	def _fail_wait(self, retries):
+		# Wait a few seconds. The more it fails the more we wait.
+		return (self._max_retries - retries + 1) * 3
+		
+	def send_request(self, request, body = None, retries = _max_retries):
 		method_string, resource, headers = request
-		info("Processing request, please wait...")
+		debug("Processing request, please wait...")
 		try:
 			conn = self.get_connection(resource['bucket'])
 			conn.request(method_string, self.format_uri(resource), body, headers)
@@ -319,6 +370,8 @@ class S3(object):
 		except Exception, e:
 			if retries:
 				warning("Retrying failed request: %s (%s)" % (resource['uri'], e))
+				warning("Waiting %d sec..." % self._fail_wait(retries))
+				time.sleep(self._fail_wait(retries))
 				return self.send_request(request, body, retries - 1)
 			else:
 				raise S3RequestError("Request failed for: %s" % resource['uri'])
@@ -328,7 +381,7 @@ class S3(object):
 			redir_bucket = getTextFromXml(response['data'], ".//Bucket")
 			redir_hostname = getTextFromXml(response['data'], ".//Endpoint")
 			self.set_hostname(redir_bucket, redir_hostname)
-			info("Redirected to: %s" % (redir_hostname))
+			warning("Redirected to: %s" % (redir_hostname))
 			return self.send_request(request, body)
 
 		if response["status"] >= 500:
@@ -336,6 +389,8 @@ class S3(object):
 			if retries:
 				warning(u"Retrying failed request: %s" % resource['uri'])
 				warning(unicode(e))
+				warning("Waiting %d sec..." % self._fail_wait(retries))
+				time.sleep(self._fail_wait(retries))
 				return self.send_request(request, body, retries - 1)
 			else:
 				raise e
@@ -345,99 +400,154 @@ class S3(object):
 
 		return response
 
-	def send_file(self, request, file, throttle = 0, retries = 3):
+	def send_file(self, request, file, labels, throttle = 0, retries = _max_retries):
 		method_string, resource, headers = request
-		info("Sending file '%s', please wait..." % file.name)
-		conn = self.get_connection(resource['bucket'])
-		conn.connect()
-		conn.putrequest(method_string, self.format_uri(resource))
-		for header in headers.keys():
-			conn.putheader(header, str(headers[header]))
-		conn.endheaders()
-		file.seek(0)
-		timestamp_start = time.time()
-		md5_hash = md5.new()
 		size_left = size_total = headers.get("content-length")
-		while (size_left > 0):
-			debug("SendFile: Reading up to %d bytes from '%s'" % (self.config.send_chunk, file.name))
-			data = file.read(self.config.send_chunk)
-			md5_hash.update(data)
-			debug("SendFile: Sending %d bytes to the server" % len(data))
-			try:
+		if self.config.progress_meter:
+			progress = self.config.progress_class(labels, size_total)
+		else:
+			info("Sending file '%s', please wait..." % file.name)
+		timestamp_start = time.time()
+		try:
+			conn = self.get_connection(resource['bucket'])
+			conn.connect()
+			conn.putrequest(method_string, self.format_uri(resource))
+			for header in headers.keys():
+				conn.putheader(header, str(headers[header]))
+			conn.endheaders()
+		except Exception, e:
+			if self.config.progress_meter:
+				progress.done("failed")
+			if retries:
+				warning("Retrying failed request: %s (%s)" % (resource['uri'], e))
+				warning("Waiting %d sec..." % self._fail_wait(retries))
+				time.sleep(self._fail_wait(retries))
+				# Connection error -> same throttle value
+				return self.send_file(request, file, labels, throttle, retries - 1)
+			else:
+				raise S3UploadError("Upload failed for: %s" % resource['uri'])
+		file.seek(0)
+		md5_hash = md5()
+		try:
+			while (size_left > 0):
+				#debug("SendFile: Reading up to %d bytes from '%s'" % (self.config.send_chunk, file.name))
+				data = file.read(self.config.send_chunk)
+				md5_hash.update(data)
 				conn.send(data)
-			except Exception, e:
-				## When an exception occurs insert a 
-				if retries:
-					conn.close()
-					warning("Upload of '%s' failed %s " % (file.name, e))
-					throttle = throttle and throttle * 5 or 0.01
-					warning("Retrying on lower speed (throttle=%0.2f)" % throttle)
-					return self.send_file(request, file, throttle, retries - 1)
-				else:
-					debug("Giving up on '%s' %s" % (file.name, e))
-					raise S3UploadError
+				if self.config.progress_meter:
+					progress.update(delta_position = len(data))
+				size_left -= len(data)
+				if throttle:
+					time.sleep(throttle)
+			md5_computed = md5_hash.hexdigest()
+			response = {}
+			http_response = conn.getresponse()
+			response["status"] = http_response.status
+			response["reason"] = http_response.reason
+			response["headers"] = convertTupleListToDict(http_response.getheaders())
+			response["data"] = http_response.read()
+			response["size"] = size_total
+			conn.close()
+			debug(u"Response: %s" % response)
+		except Exception, e:
+			if self.config.progress_meter:
+				progress.done("failed")
+			if retries:
+				throttle = throttle and throttle * 5 or 0.01
+				warning("Upload failed: %s (%s)" % (resource['uri'], e))
+				warning("Retrying on lower speed (throttle=%0.2f)" % throttle)
+				warning("Waiting %d sec..." % self._fail_wait(retries))
+				time.sleep(self._fail_wait(retries))
+				# Connection error -> same throttle value
+				return self.send_file(request, file, labels, throttle, retries - 1)
+			else:
+				debug("Giving up on '%s' %s" % (file.name, e))
+				raise S3UploadError("Upload failed for: %s" % resource['uri'])
 
-			size_left -= len(data)
-			if throttle:
-				time.sleep(throttle)
-			debug("Sent %d bytes (%d %% of %d)" % (
-				(size_total - size_left),
-				(size_total - size_left) * 100 / size_total,
-				size_total))
 		timestamp_end = time.time()
-		md5_computed = md5_hash.hexdigest()
-		response = {}
-		http_response = conn.getresponse()
-		response["status"] = http_response.status
-		response["reason"] = http_response.reason
-		response["headers"] = convertTupleListToDict(http_response.getheaders())
-		response["data"] = http_response.read()
 		response["elapsed"] = timestamp_end - timestamp_start
-		response["size"] = size_total
 		response["speed"] = response["elapsed"] and float(response["size"]) / response["elapsed"] or float(-1)
-		conn.close()
+
+		if self.config.progress_meter:
+			## The above conn.close() takes some time -> update() progress meter
+			## to correct the average speed. Otherwise people will complain that 
+			## 'progress' and response["speed"] are inconsistent ;-)
+			progress.update()
+			progress.done("done")
 
 		if response["status"] == 307:
 			## RedirectPermanent
 			redir_bucket = getTextFromXml(response['data'], ".//Bucket")
 			redir_hostname = getTextFromXml(response['data'], ".//Endpoint")
 			self.set_hostname(redir_bucket, redir_hostname)
-			info("Redirected to: %s" % (redir_hostname))
-			return self.send_file(request, file)
+			warning("Redirected to: %s" % (redir_hostname))
+			return self.send_file(request, file, labels)
 
 		# S3 from time to time doesn't send ETag back in a response :-(
 		# Force re-upload here.
 		if not response['headers'].has_key('etag'):
 			response['headers']['etag'] = '' 
 
+		if response["status"] < 200 or response["status"] > 299:
+			if response["status"] >= 500:
+				## AWS internal error - retry
+				if retries:
+					warning("Upload failed: %s (%s)" % (resource['uri'], S3Error(response)))
+					warning("Waiting %d sec..." % self._fail_wait(retries))
+					time.sleep(self._fail_wait(retries))
+					return self.send_file(request, file, labels, throttle, retries - 1)
+				else:
+					warning("Too many failures. Giving up on '%s'" % (file.name))
+					raise S3UploadError
+			## Non-recoverable error
+			raise S3Error(response)
+
 		debug("MD5 sums: computed=%s, received=%s" % (md5_computed, response["headers"]["etag"]))
 		if response["headers"]["etag"].strip('"\'') != md5_hash.hexdigest():
 			warning("MD5 Sums don't match!")
 			if retries:
-				info("Retrying upload.")
-				return self.send_file(request, file, throttle, retries - 1)
+				warning("Retrying upload of %s" % (file.name))
+				return self.send_file(request, file, labels, throttle, retries - 1)
 			else:
-				debug("Too many failures. Giving up on '%s'" % (file.name))
+				warning("Too many failures. Giving up on '%s'" % (file.name))
 				raise S3UploadError
 
-		if response["status"] < 200 or response["status"] > 299:
-			raise S3Error(response)
 		return response
 
-	def recv_file(self, request, stream):
+	def recv_file(self, request, stream, labels, start_position = 0, retries = _max_retries):
 		method_string, resource, headers = request
-		info("Receiving file '%s', please wait..." % stream.name)
-		conn = self.get_connection(resource['bucket'])
-		conn.connect()
-		conn.putrequest(method_string, self.format_uri(resource))
-		for header in headers.keys():
-			conn.putheader(header, str(headers[header]))
-		conn.endheaders()
-		response = {}
-		http_response = conn.getresponse()
-		response["status"] = http_response.status
-		response["reason"] = http_response.reason
-		response["headers"] = convertTupleListToDict(http_response.getheaders())
+		if self.config.progress_meter:
+			progress = self.config.progress_class(labels, 0)
+		else:
+			info("Receiving file '%s', please wait..." % stream.name)
+		timestamp_start = time.time()
+		try:
+			conn = self.get_connection(resource['bucket'])
+			conn.connect()
+			conn.putrequest(method_string, self.format_uri(resource))
+			for header in headers.keys():
+				conn.putheader(header, str(headers[header]))
+			if start_position > 0:
+				debug("Requesting Range: %d .. end" % start_position)
+				conn.putheader("Range", "bytes=%d-" % start_position)
+			conn.endheaders()
+			response = {}
+			http_response = conn.getresponse()
+			response["status"] = http_response.status
+			response["reason"] = http_response.reason
+			response["headers"] = convertTupleListToDict(http_response.getheaders())
+			debug("Response: %s" % response)
+		except Exception, e:
+			if self.config.progress_meter:
+				progress.done("failed")
+			if retries:
+				warning("Retrying failed request: %s (%s)" % (resource['uri'], e))
+				warning("Waiting %d sec..." % self._fail_wait(retries))
+				time.sleep(self._fail_wait(retries))
+				# Connection error -> same throttle value
+				return self.recv_file(request, stream, labels, start_position, retries - 1)
+			else:
+				raise S3DownloadError("Download failed for: %s" % resource['uri'])
 
 		if response["status"] == 307:
 			## RedirectPermanent
@@ -445,38 +555,79 @@ class S3(object):
 			redir_bucket = getTextFromXml(response['data'], ".//Bucket")
 			redir_hostname = getTextFromXml(response['data'], ".//Endpoint")
 			self.set_hostname(redir_bucket, redir_hostname)
-			info("Redirected to: %s" % (redir_hostname))
-			return self.recv_file(request, stream)
+			warning("Redirected to: %s" % (redir_hostname))
+			return self.recv_file(request, stream, labels)
 
 		if response["status"] < 200 or response["status"] > 299:
 			raise S3Error(response)
 
-		md5_hash = md5.new()
-		size_left = size_total = int(response["headers"]["content-length"])
-		size_recvd = 0
-		timestamp_start = time.time()
-		while (size_recvd < size_total):
-			this_chunk = size_left > self.config.recv_chunk and self.config.recv_chunk or size_left
-			debug("ReceiveFile: Receiving up to %d bytes from the server" % this_chunk)
-			data = http_response.read(this_chunk)
-			debug("ReceiveFile: Writing %d bytes to file '%s'" % (len(data), stream.name))
-			stream.write(data)
-			md5_hash.update(data)
-			size_recvd += len(data)
-			debug("Received %d bytes (%d %% of %d)" % (
-				size_recvd,
-				size_recvd * 100 / size_total,
-				size_total))
-		conn.close()
+		if start_position == 0:
+			# Only compute MD5 on the fly if we're downloading from beginning
+			# Otherwise we'd get a nonsense.
+			md5_hash = md5()
+		size_left = int(response["headers"]["content-length"])
+		size_total = start_position + size_left
+		current_position = start_position
+
+		if self.config.progress_meter:
+			progress.total_size = size_total
+			progress.initial_position = current_position
+			progress.current_position = current_position
+
+		try:
+			while (current_position < size_total):
+				this_chunk = size_left > self.config.recv_chunk and self.config.recv_chunk or size_left
+				data = http_response.read(this_chunk)
+				stream.write(data)
+				if start_position == 0:
+					md5_hash.update(data)
+				current_position += len(data)
+				## Call progress meter from here...
+				if self.config.progress_meter:
+					progress.update(delta_position = len(data))
+			conn.close()
+		except Exception, e:
+			if self.config.progress_meter:
+				progress.done("failed")
+			if retries:
+				warning("Retrying failed request: %s (%s)" % (resource['uri'], e))
+				warning("Waiting %d sec..." % self._fail_wait(retries))
+				time.sleep(self._fail_wait(retries))
+				# Connection error -> same throttle value
+				return self.recv_file(request, stream, labels, current_position, retries - 1)
+			else:
+				raise S3DownloadError("Download failed for: %s" % resource['uri'])
+
+		stream.flush()
 		timestamp_end = time.time()
-		response["md5"] = md5_hash.hexdigest()
+
+		if self.config.progress_meter:
+			## The above stream.flush() may take some time -> update() progress meter
+			## to correct the average speed. Otherwise people will complain that 
+			## 'progress' and response["speed"] are inconsistent ;-)
+			progress.update()
+			progress.done("done")
+
+		if start_position == 0:
+			# Only compute MD5 on the fly if we were downloading from the beginning
+			response["md5"] = md5_hash.hexdigest()
+		else:
+			# Otherwise try to compute MD5 of the output file
+			try:
+				response["md5"] = hash_file_md5(stream.name)
+			except IOError, e:
+				if e.errno != errno.ENOENT:
+					warning("Unable to open file: %s: %s" % (stream.name, e))
+				warning("Unable to verify MD5. Assume it matches.")
+				response["md5"] = response["headers"]["etag"]
+
 		response["md5match"] = response["headers"]["etag"].find(response["md5"]) >= 0
 		response["elapsed"] = timestamp_end - timestamp_start
-		response["size"] = size_recvd
+		response["size"] = current_position
 		response["speed"] = response["elapsed"] and float(response["size"]) / response["elapsed"] or float(-1)
-		if response["size"] != long(response["headers"]["content-length"]):
+		if response["size"] != start_position + long(response["headers"]["content-length"]):
 			warning("Reported size (%s) does not match received size (%s)" % (
-				response["headers"]["content-length"], response["size"]))
+				start_position + response["headers"]["content-length"], response["size"]))
 		debug("ReceiveFile: Computed MD5 = %s" % response["md5"])
 		if not response["md5match"]:
 			warning("MD5 signatures do not match: computed=%s, received=%s" % (
@@ -495,7 +646,7 @@ class S3(object):
 			h += "/" + resource['bucket']
 		h += resource['uri']
 		debug("SignHeaders: " + repr(h))
-		return base64.encodestring(hmac.new(self.config.secret_key, h, sha).digest()).strip()
+		return base64.encodestring(hmac.new(self.config.secret_key, h, sha1).digest()).strip()
 
 	@staticmethod
 	def check_bucket_name(bucket, dns_strict = True):

@@ -8,35 +8,23 @@ import time
 import re
 import string
 import random
-import md5
+import rfc822
+try:
+	from hashlib import md5
+except ImportError:
+	from md5 import md5
 import errno
 
 from logging import debug, info, warning, error
+
+import Config
 
 try:
 	import xml.etree.ElementTree as ET
 except ImportError:
 	import elementtree.ElementTree as ET
 
-def stripTagXmlns(xmlns, tag):
-	"""
-	Returns a function that, given a tag name argument, removes
-	eventual ElementTree xmlns from it.
-
-	Example:
-		stripTagXmlns("{myXmlNS}tag") -> "tag"
-	"""
-	if not xmlns:
-		return tag
-	return re.sub(xmlns, "", tag)
-
-def fixupXPath(xmlns, xpath, max = 0):
-	if not xmlns:
-		return xpath
-	retval = re.subn("//", "//%s" % xmlns, xpath, max)[0]
-	return retval
-
-def parseNodes(nodes, xmlns = ""):
+def parseNodes(nodes):
 	## WARNING: Ignores text nodes from mixed xml/text.
 	## For instance <tag1>some text<tag2>other text</tag2></tag1>
 	## will be ignore "some text" node
@@ -44,32 +32,76 @@ def parseNodes(nodes, xmlns = ""):
 	for node in nodes:
 		retval_item = {}
 		for child in node.getchildren():
-			name = stripTagXmlns(xmlns, child.tag)
+			name = child.tag
 			if child.getchildren():
-				retval_item[name] = parseNodes([child], xmlns)
+				retval_item[name] = parseNodes([child])
 			else:
 				retval_item[name] = node.findtext(".//%s" % child.tag)
 		retval.append(retval_item)
 	return retval
 
-def getNameSpace(element):
-	if not element.tag.startswith("{"):
-		return ""
-	return re.compile("^(\{[^}]+\})").match(element.tag).groups()[0]
+def stripNameSpace(xml):
+	"""
+	removeNameSpace(xml) -- remove top-level AWS namespace
+	"""
+	r = re.compile('^(<?[^>]+?>\s?)(<\w+) xmlns=[\'"](http://[^\'"]+)[\'"](.*)', re.MULTILINE)
+	if r.match(xml):
+		xmlns = r.match(xml).groups()[2]
+		xml = r.sub("\\1\\2\\4", xml)
+	else:
+		xmlns = None
+	return xml, xmlns
 
-def getListFromXml(xml, node):
+def getTreeFromXml(xml):
+	xml, xmlns = stripNameSpace(xml)
 	tree = ET.fromstring(xml)
-	xmlns = getNameSpace(tree)
-	nodes = tree.findall('.//%s%s' % (xmlns, node))
-	return parseNodes(nodes, xmlns)
+	if xmlns:
+		tree.attrib['xmlns'] = xmlns
+	return tree
 	
+def getListFromXml(xml, node):
+	tree = getTreeFromXml(xml)
+	nodes = tree.findall('.//%s' % (node))
+	return parseNodes(nodes)
+
+def getDictFromTree(tree):
+	ret_dict = {}
+	for child in tree.getchildren():
+		if child.getchildren():
+			## Complex-type child. We're not interested
+			continue
+		if ret_dict.has_key(child.tag):
+			if not type(ret_dict[child.tag]) == list:
+				ret_dict[child.tag] = [ret_dict[child.tag]]
+			ret_dict[child.tag].append(child.text or "")
+		else:
+			ret_dict[child.tag] = child.text or ""
+	return ret_dict
+
 def getTextFromXml(xml, xpath):
-	tree = ET.fromstring(xml)
-	xmlns = getNameSpace(tree)
+	tree = getTreeFromXml(xml)
 	if tree.tag.endswith(xpath):
 		return tree.text
 	else:
-		return tree.findtext(fixupXPath(xmlns, xpath))
+		return tree.findtext(xpath)
+
+def getRootTagName(xml):
+	tree = getTreeFromXml(xml)
+	return tree.tag
+
+def xmlTextNode(tag_name, text):
+	el = ET.Element(tag_name)
+	el.text = unicode(text)
+	return el
+
+def appendXmlTextNode(tag_name, text, parent):
+	"""
+	Creates a new <tag_name> Node and sets
+	its content to 'text'. Then appends the
+	created Node to 'parent' element if given.
+	Returns the newly created Node.
+	"""
+	parent.append(xmlTextNode(tag_name, text))
 
 def dateS3toPython(date):
 	date = re.compile("\.\d\d\dZ").sub(".000Z", date)
@@ -80,6 +112,12 @@ def dateS3toUnix(date):
 	## Currently the argument to strptime() is GMT but mktime() 
 	## treats it as "localtime". Anyway...
 	return time.mktime(dateS3toPython(date))
+
+def dateRFC822toPython(date):
+	return rfc822.parsedate(date)
+
+def dateRFC822toUnix(date):
+	return time.mktime(dateRFC822toPython(date))
 
 def formatSize(size, human_readable = False, floating_point = False):
 	size = floating_point and float(size) or int(size)
@@ -137,7 +175,7 @@ def mktmpfile(prefix = "/tmp/tmpfile-", randchars = 20):
 	return mktmpsomething(prefix, randchars, createfunc)
 
 def hash_file_md5(filename):
-	h = md5.new()
+	h = md5()
 	f = open(filename, "rb")
 	while True:
 		# Hash 32kB chunks
@@ -174,21 +212,44 @@ def mkdir_with_parents(dir_name):
 			return False
 	return True
 
-def unicodise(string):
+def unicodise(string, encoding = None, errors = "replace"):
 	"""
 	Convert 'string' to Unicode or raise an exception.
 	"""
-	debug("Unicodising %r" % string)
+
+	if not encoding:
+		encoding = Config.Config().encoding
+
 	if type(string) == unicode:
 		return string
+	debug("Unicodising %r using %s" % (string, encoding))
 	try:
-		return string.decode("utf-8")
+		return string.decode(encoding, errors)
 	except UnicodeDecodeError:
 		raise UnicodeDecodeError("Conversion to unicode failed: %r" % string)
 
-def try_unicodise(string):
+def deunicodise(string, encoding = None, errors = "replace"):
+	"""
+	Convert unicode 'string' to <type str>, by default replacing
+	all invalid characters with '?' or raise an exception.
+	"""
+
+	if not encoding:
+		encoding = Config.Config().encoding
+
+	if type(string) != unicode:
+		return str(string)
+	debug("DeUnicodising %r using %s" % (string, encoding))
 	try:
-		return unicodise(string)
-	except UnicodeDecodeError:
-		return string
+		return string.encode(encoding, errors)
+	except UnicodeEncodeError:
+		raise UnicodeEncodeError("Conversion from unicode failed: %r" % string)
+
+def unicodise_safe(string, encoding = None):
+	"""
+	Convert 'string' to Unicode according to current encoding 
+	and replace all invalid characters with '?'
+	"""
+
+	return unicodise(deunicodise(string, encoding), encoding).replace(u'\ufffd', '?')
 
