@@ -1,18 +1,43 @@
 from distutils.core import setup
+import sys
 import os
 
 import S3.PkgInfo
 
-## Remove 'MANIFEST' file to force
-## distutils to recreate it
+if float("%d.%d" % sys.version_info[:2]) < 2.4:
+	sys.stderr.write("Your Python version %d.%d.%d is not supported.\n" % sys.version_info[:3])
+	sys.stderr.write("S3cmd required Python 2.4 or newer.\n")
+	sys.exit(1)
+
 try:
-	os.unlink("MANIFEST")
+	import elementtree.ElementTree as ET
+except ImportError, e:
+	sys.stderr.write(e.message + "\n")
+	sys.stderr.write("Please upgrade to Python 2.5 or install ElementTree module\n")
+	sys.stderr.write("from http://effbot.org/zone/element-index.htm\n")
+	sys.exit(1)
+
+try:
+	## Remove 'MANIFEST' file to force
+	## distutils to recreate it.
+	## Only in "sdist" stage. Otherwise 
+	## it makes life difficult to packagers.
+	if sys.argv[1] == "sdist":
+		os.unlink("MANIFEST")
 except:
 	pass
 
-## Compress manpage. It behaves weird 
-## with bdist_rpm when not compressed.
-os.system("gzip -c s3cmd.1 > s3cmd.1.gz")
+## Don't install manpages and docs when $S3CMD_PACKAGING is set
+## This was a requirement of Debian package maintainer. 
+if not os.getenv("S3CMD_PACKAGING"):
+	man_path = os.getenv("S3CMD_INSTPATH_MAN") or "share/man"
+	doc_path = os.getenv("S3CMD_INSTPATH_DOC") or "share/doc/packages"
+	data_files = [	
+		(doc_path+"/s3cmd", [ "README", "INSTALL", "NEWS" ]),
+		(man_path+"/man1", [ "s3cmd.1" ] ),
+	]
+else:
+	data_files = None
 
 ## Main distutils info
 setup(
@@ -21,10 +46,7 @@ setup(
 	version = S3.PkgInfo.version,
 	packages = [ 'S3' ],
 	scripts = ['s3cmd'],
-	data_files = [
-		("share/doc/packages/s3cmd", [ "README", "INSTALL", "NEWS" ]),
-		("share/man/man1", [ "s3cmd.1.gz" ] ),
-	],
+	data_files = data_files,
 
 	## Packaging details
 	author = "Michal Ludvig",

@@ -83,6 +83,20 @@ class S3(object):
 	def __init__(self, config):
 		self.config = config
 
+	def get_connection(self):
+		if self.config.use_https:
+			return httplib.HTTPSConnection(self.config.host)
+		if self.config.proxy_host != "":
+			return httplib.HTTPConnection(self.config.proxy_host, self.config.proxy_port)
+		else:
+			return httplib.HTTPConnection(self.config.host)
+
+	def format_resource(self, resource):
+		if self.config.proxy_host != "":
+			resource = "http://%s%s" % (self.config.host, resource)
+
+		return resource
+
 	## Commands / Actions
 	def list_all_buckets(self):
 		request = self.create_request("LIST_ALL_BUCKETS")
@@ -100,7 +114,9 @@ class S3(object):
 
 	def bucket_create(self, bucket):
 		self.check_bucket_name(bucket)
-		request = self.create_request("BUCKET_CREATE", bucket = bucket)
+		headers = SortedDict()
+		headers["content-length"] = 0
+		request = self.create_request("BUCKET_CREATE", bucket = bucket, headers = headers)
 		response = self.send_request(request)
 		return response
 
@@ -109,7 +125,7 @@ class S3(object):
 		response = self.send_request(request)
 		return response
 
-	def object_put(self, filename, bucket, object):
+	def object_put(self, filename, bucket, object, extra_headers = None):
 		if not os.path.isfile(filename):
 			raise ParameterError("%s is not a regular file" % filename)
 		try:
@@ -118,6 +134,8 @@ class S3(object):
 		except IOError, e:
 			raise ParameterError("%s: %s" % (filename, e.strerror))
 		headers = SortedDict()
+		if extra_headers:
+			headers.update(extra_headers)
 		headers["content-length"] = size
 		if self.config.acl_public:
 			headers["x-amz-acl"] = "public-read"
@@ -143,10 +161,10 @@ class S3(object):
 		response = self.send_request(request)
 		return response
 
-	def object_put_uri(self, filename, uri):
+	def object_put_uri(self, filename, uri, extra_headers = None):
 		if uri.type != "s3":
 			raise ValueError("Expected URI type 's3', got '%s'" % uri.type)
-		return self.object_put(filename, uri.bucket(), uri.object())
+		return self.object_put(filename, uri.bucket(), uri.object(), extra_headers)
 
 	def object_get_uri(self, uri, filename):
 		if uri.type != "s3":
@@ -162,12 +180,49 @@ class S3(object):
 		return self.object_delete(uri.bucket(), uri.object())
 
 	## Low level methods
+	def urlencode_string(self, string):
+		encoded = ""
+		## List of characters that must be escaped for S3
+		## Haven't found this in any official docs
+		## but my tests show it's more less correct.
+		## If you start getting InvalidSignature errors
+		## from S3 check the error headers returned
+		## from S3 to see whether the list hasn't
+		## changed.
+		for c in string:	# I'm not sure how to know in what encoding 
+					# 'object' is. Apparently "type(object)==str"
+					# but the contents is a string of unicode
+					# bytes, e.g. '\xc4\x8d\xc5\xafr\xc3\xa1k'
+					# Don't know what it will do on non-utf8 
+					# systems.
+					#           [hope that sounds reassuring ;-)]
+			o = ord(c)
+			if (o <= 32 or		# Space and below
+			    o == 0x22 or	# "
+			    o == 0x23 or	# #
+			    o == 0x25 or	# %
+			    o == 0x2B or	# + (or it would become <space>)
+			    o == 0x3C or	# <
+			    o == 0x3E or	# >
+			    o == 0x3F or	# ?
+			    o == 0x5B or	# [
+			    o == 0x5C or	# \
+			    o == 0x5D or	# ]
+			    o == 0x5E or	# ^
+			    o == 0x60 or	# `
+			    o >= 123):   	# { and above, including >= 128 for UTF-8
+				encoded += "%%%02X" % o
+			else:
+				encoded += c
+		debug("String '%s' encoded to '%s'" % (string, encoded))
+		return encoded
+
 	def create_request(self, operation, bucket = None, object = None, headers = None, **params):
 		resource = "/"
 		if bucket:
 			resource += str(bucket)
 			if object:
-				resource += "/"+str(object)
+				resource += "/" + self.urlencode_string(object)
 
 		if not headers:
 			headers = SortedDict()
@@ -195,8 +250,8 @@ class S3(object):
 	def send_request(self, request):
 		method_string, resource, headers = request
 		info("Processing request, please wait...")
-		conn = httplib.HTTPConnection(self.config.host)
-		conn.request(method_string, resource, {}, headers)
+ 		conn = self.get_connection()
+ 		conn.request(method_string, self.format_resource(resource), {}, headers)
 		response = {}
 		http_response = conn.getresponse()
 		response["status"] = http_response.status
@@ -211,9 +266,9 @@ class S3(object):
 	def send_file(self, request, file):
 		method_string, resource, headers = request
 		info("Sending file '%s', please wait..." % file.name)
-		conn = httplib.HTTPConnection(self.config.host)
+		conn = self.get_connection()
 		conn.connect()
-		conn.putrequest(method_string, resource)
+		conn.putrequest(method_string, self.format_resource(resource))
 		for header in headers.keys():
 			conn.putheader(header, str(headers[header]))
 		conn.endheaders()
@@ -242,9 +297,9 @@ class S3(object):
 	def recv_file(self, request, stream):
 		method_string, resource, headers = request
 		info("Receiving file '%s', please wait..." % stream.name)
-		conn = httplib.HTTPConnection(self.config.host)
+		conn = self.get_connection()
 		conn.connect()
-		conn.putrequest(method_string, resource)
+		conn.putrequest(method_string, self.format_resource(resource))
 		for header in headers.keys():
 			conn.putheader(header, str(headers[header]))
 		conn.endheaders()

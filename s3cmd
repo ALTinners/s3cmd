@@ -8,17 +8,21 @@
 import sys
 import logging
 import time
+import os
+import re
 
 from copy import copy
 from optparse import OptionParser, Option, OptionValueError, IndentedHelpFormatter
 from logging import debug, info, warning, error
 import elementtree.ElementTree as ET
+from distutils.spawn import find_executable
 
 ## Our modules
 from S3 import PkgInfo
 from S3.S3 import *
 from S3.Config import Config
 from S3.S3Uri import *
+from S3 import Utils
 
 
 def output(message):
@@ -172,14 +176,21 @@ def cmd_object_put(args):
 		uri_arg_final = str(uri)
 		if len(files) > 1 or uri.object() == "":
 			uri_arg_final += os.path.basename(file)
-
+		
 		uri_final = S3Uri(uri_arg_final)
-		response = s3.object_put_uri(file, uri_final)
+		extra_headers = {}
+		real_filename = file
+		if Config().encrypt:
+			exitcode, real_filename, extra_headers["x-amz-meta-s3tools-gpgenc"] = gpg_encrypt(file)
+		response = s3.object_put_uri(real_filename, uri_final, extra_headers)
 		output("File '%s' stored as %s (%d bytes)" %
 			(file, uri_final, response["size"]))
 		if Config().acl_public:
 			output("Public URL of the object is: %s" %
 				(uri.public_url()))
+		if Config().encrypt and real_filename != file:
+			debug("Removing temporary encrypted file: %s" % real_filename)
+			os.remove(real_filename)
 
 def cmd_object_get(args):
 	s3 = S3(Config())
@@ -195,6 +206,9 @@ def cmd_object_get(args):
 	if not Config().force and os.path.exists(destination):
 		raise ParameterError("File %s already exists. Use --force to overwrite it" % destination)
 	response = s3.object_get_uri(uri, destination)
+	if response["headers"].has_key("x-amz-meta-s3tools-gpgenc"):
+		gpg_decrypt(destination, response["headers"]["x-amz-meta-s3tools-gpgenc"])
+		response["size"] = os.stat(destination)[6]
 	if destination != "-":
 		output("Object %s saved as '%s' (%d bytes)" %
 			(uri, destination, response["size"]))
@@ -210,30 +224,105 @@ def cmd_object_del(args):
 	response = s3.object_delete_uri(uri)
 	output("Object %s deleted" % uri)
 
+def resolve_list(lst, args):
+	retval = []
+	for item in lst:
+		retval.append(item % args)
+	return retval
+
+def gpg_command(command, passphrase = ""):
+	p_in, p_out = os.popen4(command)
+	if command.count("--passphrase-fd"):
+		p_in.write(passphrase+"\n")
+		p_in.flush()
+	for line in p_out:
+		info(line.strip())
+	p_pid, p_exitcode = os.wait()
+	return p_exitcode
+
+def gpg_encrypt(filename):
+	tmp_filename = Utils.mktmpfile()
+	args = {
+		"gpg_command" : cfg.gpg_command,
+		"passphrase_fd" : "0",
+		"input_file" : filename, 
+		"output_file" : tmp_filename,
+	}
+	info("Encrypting file %(input_file)s to %(output_file)s..." % args)
+	command = resolve_list(cfg.gpg_encrypt.split(" "), args)
+	code = gpg_command(command, cfg.gpg_passphrase)
+	return (code, tmp_filename, "gpg")
+
+def gpg_decrypt(filename, gpgenc_header = "", in_place = True):
+	tmp_filename = Utils.mktmpfile(filename)
+	args = {
+		"gpg_command" : cfg.gpg_command,
+		"passphrase_fd" : "0",
+		"input_file" : filename, 
+		"output_file" : tmp_filename,
+	}
+	info("Decrypting file %(input_file)s to %(output_file)s..." % args)
+	command = resolve_list(cfg.gpg_decrypt.split(" "), args)
+	code = gpg_command(command, cfg.gpg_passphrase)
+	if code == 0 and in_place:
+		debug("Renaming %s to %s" % (tmp_filename, filename))
+		os.unlink(filename)
+		os.rename(tmp_filename, filename)
+		tmp_filename = filename
+	return (code, tmp_filename)
+
 def run_configure(config_file):
 	cfg = Config()
 	options = [
 		("access_key", "Access Key", "Access key and Secret key are your identifiers for Amazon S3"),
 		("secret_key", "Secret Key"),
+		("gpg_passphrase", "Encryption password", "Encryption password is used to protect your files from reading\nby unauthorized persons while in transfer to S3"),
+		("gpg_command", "Path to GPG program"),
+		("use_https", "Use HTTPS protocol", "When using secure HTTPS protocol all communication with Amazon S3\nservers is protected from 3rd party eavesdropping. This method is\nslower than plain HTTP and can't be used if you're behind a proxy"),
+		("proxy_host", "HTTP Proxy server name", "On some networks all internet access must go through a HTTP proxy.\nTry setting it here if you can't conect to S3 directly"),
+		("proxy_port", "HTTP Proxy server port"),
 		]
+	## Option-specfic defaults
+	if getattr(cfg, "gpg_command") == "":
+		setattr(cfg, "gpg_command", find_executable("gpg"))
+
+	if getattr(cfg, "proxy_host") == "" and os.getenv("http_proxy"):
+		re_match=re.match("(http://)?([^:]+):(\d+)", os.getenv("http_proxy"))
+		if re_match:
+			setattr(cfg, "proxy_host", re_match.groups()[1])
+			setattr(cfg, "proxy_port", re_match.groups()[2])
+
 	try:
 		while 1:
 			output("\nEnter new values or accept defaults in brackets with Enter.")
-			output("Refer to user manual for detailed description of all options.\n")
+			output("Refer to user manual for detailed description of all options.")
 			for option in options:
 				prompt = option[1]
+				## Option-specific handling
+				if option[0] == 'proxy_host' and getattr(cfg, 'use_https') == True:
+					setattr(cfg, option[0], "")
+					continue
+				if option[0] == 'proxy_port' and getattr(cfg, 'proxy_host') == "":
+					setattr(cfg, option[0], 0)
+					continue
+
 				try:
 					val = getattr(cfg, option[0])
+					if type(val) is bool:
+						val = val and "Yes" or "No"
 					if val not in (None, ""):
 						prompt += " [%s]" % val
 				except AttributeError:
 					pass
 
 				if len(option) >= 3:
-					output("%s" % option[2])
+					output("\n%s" % option[2])
 
 				val = raw_input(prompt + ": ")
 				if val != "":
+					if type(getattr(cfg, option[0])) is bool:
+						# Turn 'Yes' into True, everything else into False
+						val = val.lower().startswith('y')
 					setattr(cfg, option[0], val)
 			output("\nNew settings:")
 			for option in options:
@@ -243,12 +332,38 @@ def run_configure(config_file):
 				try:
 					output("Please wait...")
 					S3(Config()).bucket_list("", "")
-					output("\nSuccess. Your access key and secret key worked fine :-)")
-				except S3Error, e:
+					output("Success. Your access key and secret key worked fine :-)")
+
+					output("\nNow verifying that encryption works...")
+					if not getattr(cfg, "gpg_command"):
+						raise Exception("Path to GPG program not set")
+					if not os.path.isfile(getattr(cfg, "gpg_command")):
+						raise Exception("GPG program not found")
+					filename = Utils.mktmpfile()
+					f = open(filename, "w")
+					f.write(os.sys.copyright)
+					f.close()
+					ret_enc = gpg_encrypt(filename)
+					ret_dec = gpg_decrypt(ret_enc[1], ret_enc[2], False)
+					hash = [
+						Utils.hash_file_md5(filename),
+						Utils.hash_file_md5(ret_enc[1]),
+						Utils.hash_file_md5(ret_dec[1]),
+					]
+					os.unlink(filename)
+					os.unlink(ret_enc[1])
+					os.unlink(ret_dec[1])
+					if hash[0] == hash[2] and hash[0] != hash[1]:
+						output ("Success. Encryption and decryption worked fine :-)") 
+					else:
+						raise Exception("Encryption verification error.")
+
+				except Exception, e:
 					error("Test failed: %s" % (e))
 					val = raw_input("\nRetry configuration? [Y/n] ")
 					if val.lower().startswith("y") or val == "":
 						continue
+					
 
 			val = raw_input("\nSave settings? [y/N] ")
 			if val.lower().startswith("y"):
@@ -274,11 +389,11 @@ commands_list = [
 	{"cmd":"mb", "label":"Make bucket", "param":"s3://BUCKET", "func":cmd_bucket_create, "argc":1},
 	{"cmd":"rb", "label":"Remove bucket", "param":"s3://BUCKET", "func":cmd_bucket_delete, "argc":1},
 	{"cmd":"ls", "label":"List objects or buckets", "param":"[s3://BUCKET[/PREFIX]]", "func":cmd_ls, "argc":0},
-	{"cmd":"du", "label":"Disk usage by buckets", "param":"[s3://BUCKET[/PREFIX]]", "func":cmd_du, "argc":0},
 	{"cmd":"la", "label":"List all object in all buckets", "param":"", "func":cmd_buckets_list_all_all, "argc":0},
 	{"cmd":"put", "label":"Put file into bucket", "param":"FILE [FILE...] s3://BUCKET[/PREFIX]", "func":cmd_object_put, "argc":2},
 	{"cmd":"get", "label":"Get file from bucket", "param":"s3://BUCKET/OBJECT LOCAL_FILE", "func":cmd_object_get, "argc":1},
 	{"cmd":"del", "label":"Delete file from bucket", "param":"s3://BUCKET/OBJECT", "func":cmd_object_del, "argc":1},
+	{"cmd":"du", "label":"Disk usage by buckets", "param":"[s3://BUCKET[/PREFIX]]", "func":cmd_du, "argc":0},
 	]
 
 def format_commands(progname):
@@ -325,6 +440,7 @@ if __name__ == '__main__':
 	optparser.add_option("-c", "--config", dest="config", metavar="FILE", help="Config file name. Defaults to %default")
 	optparser.add_option(      "--dump-config", dest="dump_config", action="store_true", help="Dump current configuration after parsing config files and command line options and exit.")
 
+	optparser.add_option("-e", "--encrypt", dest="encrypt", action="store_true", help="Encrypt files before uploading to S3.")
 	optparser.add_option("-f", "--force", dest="force", action="store_true", help="Force overwrite and other dangerous operations.")
 	optparser.add_option("-P", "--acl-public", dest="acl_public", action="store_true", help="Store objects with ACL allowing read by anyone.")
 
@@ -381,6 +497,11 @@ if __name__ == '__main__':
 		except AttributeError:
 			## Some Config() options are not settable from command line
 			pass
+
+	if cfg.encrypt and cfg.gpg_passphrase == "":
+		error("Encryption requested but no passphrase set in config file.")
+		error("Please re-run 's3cmd --configure' and supply it.")
+		sys.exit(1)
 
 	if options.dump_config:
 		cfg.dump_config(sys.stdout)
