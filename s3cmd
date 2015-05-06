@@ -14,14 +14,25 @@ import errno
 import pwd, grp
 import glob
 import traceback
+import codecs
 
 from copy import copy
 from optparse import OptionParser, Option, OptionValueError, IndentedHelpFormatter
 from logging import debug, info, warning, error
 from distutils.spawn import find_executable
 
+## Output native on TTY, UTF-8 otherwise (redirects)
+#_stdout = sys.stdout.isatty() and sys.stdout or codecs.getwriter("utf-8")(sys.stdout)
+#_stderr = sys.stderr.isatty() and sys.stderr or codecs.getwriter("utf-8")(sys.stderr)
+## Output UTF-8 in all cases
+_stdout = codecs.getwriter("utf-8")(sys.stdout)
+_stderr = codecs.getwriter("utf-8")(sys.stderr)
+## Leave it to the terminal
+#_stdout = sys.stdout
+#_stderr = sys.stderr
+
 def output(message):
-	print message
+	_stdout.write(message + "\n")
 
 def check_args_type(args, type, verbose_type):
 	for arg in args:
@@ -104,7 +115,7 @@ def subcmd_bucket_list(s3, uri):
 	bucket = uri.bucket()
 	object = uri.object()
 
-	output("Bucket '%s':" % bucket)
+	output("Bucket 's3://%s':" % bucket)
 	if object.endswith('*'):
 		object = object[:-1]
 	try:
@@ -188,6 +199,9 @@ def cmd_object_put(args):
 			response = s3.object_put_uri(real_filename, uri_final, extra_headers)
 		except S3UploadError, e:
 			error("Upload of '%s' failed too many times. Skipping that file." % real_filename)
+			continue
+		except InvalidFileError, e:
+			warning("File can not be uploaded: %s" % e)
 			continue
 		speed_fmt = formatSize(response["speed"], human_readable = True, floating_point = True)
 		output("File '%s' stored as %s (%d bytes in %0.1f seconds, %0.2f %sB/s) [%d of %d]" %
@@ -342,12 +356,12 @@ def _get_filelist_remote(remote_uri):
 	rem_base_len = len(rem_base)
 	rem_list = {}
 	for object in response['list']:
-		key = object['Key'][rem_base_len:].encode('utf-8')
+		key = object['Key'][rem_base_len:]
 		rem_list[key] = { 
 			'size' : int(object['Size']),
 			# 'mtime' : dateS3toUnix(object['LastModified']), ## That's upload time, not our lastmod time :-(
 			'md5' : object['ETag'][1:-1],
-			'object_key' : object['Key'].encode('utf-8'),
+			'object_key' : object['Key']
 		}
 	return rem_list
 	
@@ -475,7 +489,7 @@ def cmd_sync_remote2local(src, dst):
 
 				debug("dst_file=%s" % dst_file)
 				# This will have failed should the file exist
-				os.open(dst_file, open_flags)
+				os.close(os.open(dst_file, open_flags))
 				# Yeah I know there is a race condition here. Sadly I don't know how to open() in exclusive mode.
 				dst_stream = open(dst_file, "wb")
 				response = s3.object_get_uri(uri, dst_stream)
@@ -498,7 +512,7 @@ def cmd_sync_remote2local(src, dst):
 				if e.errno in (errno.EPERM, errno.EACCES):
 					warning("%s not writable: %s" % (dst_file, e.strerror))
 					continue
-				raise
+				raise e
 			except KeyboardInterrupt:
 				try: dst_stream.close()
 				except: pass
@@ -554,7 +568,14 @@ def cmd_sync_local2remote(src, dst):
 		for k in attrs: result += "%s:%s/" % (k, attrs[k])
 		return { 'x-amz-meta-s3cmd-attrs' : result[:-1] }
 
-	s3 = S3(Config())
+	s3 = S3(cfg)
+
+	if cfg.encrypt:
+		error("S3cmd 'sync' doesn't support GPG encryption, sorry.")
+		error("Either use unconditional 's3cmd put --recursive'")
+		error("or disable encryption with --no-encryption parameter.")
+		sys.exit(1)
+
 
 	src_uri = S3Uri(src)
 	dst_uri = S3Uri(dst)
@@ -599,6 +620,9 @@ def cmd_sync_local2remote(src, dst):
 			response = s3.object_put_uri(src, uri, attr_header)
 		except S3UploadError, e:
 			error("%s: upload failed too many times. Skipping that file." % src)
+			continue
+		except InvalidFileError, e:
+			warning("File can not be uploaded: %s" % e)
 			continue
 		speed_fmt = formatSize(response["speed"], human_readable = True, floating_point = True)
 		output("File '%s' stored as %s (%d bytes in %0.1f seconds, %0.2f %sB/s) [%d of %d]" %
@@ -912,7 +936,9 @@ def main():
 
 	## Some mucking with logging levels to enable 
 	## debugging/verbose output for config file parser on request
-	logging.basicConfig(level=options.verbosity, format='%(levelname)s: %(message)s')
+	logging.basicConfig(level=options.verbosity,
+	                    format='%(levelname)s: %(message)s',
+	                    stream = _stderr)
 	
 	if options.show_version:
 		output("s3cmd version %s" % PkgInfo.version)
@@ -1001,9 +1027,12 @@ def main():
 		error("Missing command. Please run with --help for more information.")
 		sys.exit(1)
 
+	## Unicodise all remaining arguments:
+	args = [unicodise(arg) for arg in args]
+
 	command = args.pop(0)
 	try:
-		debug("Command: " + commands[command]["cmd"])
+		debug("Command: %s" % commands[command]["cmd"])
 		## We must do this lookup in extra step to 
 		## avoid catching all KeyError exceptions
 		## from inner functions.
@@ -1019,10 +1048,10 @@ def main():
 	try:
 		cmd_func(args)
 	except S3Error, e:
-		error("S3 error: " + str(e))
+		error("S3 error: %s" % e)
 		sys.exit(1)
 	except ParameterError, e:
-		error("Parameter problem: " + str(e))
+		error("Parameter problem: %s" % e)
 		sys.exit(1)
 
 if __name__ == '__main__':
@@ -1036,6 +1065,7 @@ if __name__ == '__main__':
 		from S3.S3Uri import *
 		from S3 import Utils
 		from S3.Exceptions import *
+		from S3.Utils import unicodise
 
 		main()
 		sys.exit(0)
