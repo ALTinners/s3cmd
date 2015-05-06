@@ -1,9 +1,8 @@
 Source: s3cmd
 Section: utils
 Priority: optional
-Maintainer: Python Applications Packaging Team <python-apps-team@lists.alioth.debian.org>
-Uploaders: Matt Domsch <matt@domsch.com>,
-           Gianfranco Costamagna <costamagnagianfranco@yahoo.it>
+Maintainer: Matt Domsch <matt@domsch.com>
+Uploaders: Gianfranco Costamagna <costamagnagianfranco@yahoo.it>
 Build-Depends: debhelper (>= 9),
                dh-python,
                python-all,
@@ -11,8 +10,8 @@ Build-Depends: debhelper (>= 9),
                python-magic,
                python-setuptools
 Standards-Version: 3.9.6
-Vcs-Git: git://anonscm.debian.org/python-modules/packages/s3cmd.git
-Vcs-Browser: http://anonscm.debian.org/cgit/python-modules/packages/s3cmd.git
+Vcs-Git: git://anonscm.debian.org/collab-maint/s3cmd.git
+Vcs-Browser: http://anonscm.debian.org/gitweb/?p=collab-maint/casablanca.git
 Homepage: http://s3tools.org/s3cmd
 
 Package: s3cmd
