@@ -3,7 +3,7 @@
 ##         http://www.logix.cz/michal
 ## License: GPL Version 2
 
-from Utils import *
+from Utils import getTreeFromXml
 
 try:
 	import xml.etree.ElementTree as ET
@@ -12,6 +12,7 @@ except ImportError:
 
 class Grantee(object):
 	ALL_USERS_URI = "http://acs.amazonaws.com/groups/global/AllUsers"
+	LOG_DELIVERY_URI = "http://acs.amazonaws.com/groups/s3/LogDelivery"
 
 	def __init__(self):
 		self.xsi_type = None
@@ -31,7 +32,7 @@ class Grantee(object):
 		return self.tag == "URI" and self.name == Grantee.ALL_USERS_URI
 	
 	def isAnonRead(self):
-		return self.isAllUsers and self.permission == "READ"
+		return self.isAllUsers() and (self.permission == "READ" or self.permission == "FULL_CONTROL")
 	
 	def getElement(self):
 		el = ET.Element("Grant")
@@ -52,6 +53,17 @@ class GranteeAnonRead(Grantee):
 		self.tag = "URI"
 		self.name = Grantee.ALL_USERS_URI
 		self.permission = "READ"
+
+class GranteeLogDelivery(Grantee):
+	def __init__(self, permission):
+		"""
+		permission must be either READ_ACP or WRITE
+		"""
+		Grantee.__init__(self)
+		self.xsi_type = "Group"
+		self.tag = "URI"
+		self.name = Grantee.LOG_DELIVERY_URI
+		self.permission = permission
 
 class ACL(object):
 	EMPTY_ACL = "<AccessControlPolicy><Owner><ID></ID></Owner><AccessControlList></AccessControlList></AccessControlPolicy>"
@@ -87,7 +99,7 @@ class ACL(object):
 			self.grantees.append(grantee)
 
 	def getGrantList(self):
-		acl = {}
+		acl = []
 		for grantee in self.grantees:
 			if grantee.display_name:
 				user = grantee.display_name
@@ -95,7 +107,7 @@ class ACL(object):
 				user = "*anon*"
 			else:
 				user = grantee.name
-			acl[user] = grantee.permission
+			acl.append({'grantee': user, 'permission': grantee.permission})
 		return acl
 
 	def getOwner(self):
@@ -109,10 +121,63 @@ class ACL(object):
 	
 	def grantAnonRead(self):
 		if not self.isAnonRead():
-			self.grantees.append(GranteeAnonRead())
+			self.appendGrantee(GranteeAnonRead())
 	
 	def revokeAnonRead(self):
 		self.grantees = [g for g in self.grantees if not g.isAnonRead()]
+
+	def appendGrantee(self, grantee):
+		self.grantees.append(grantee)
+
+	def hasGrant(self, name, permission):
+		name = name.lower()
+		permission = permission.upper()
+
+		for grantee in self.grantees:
+			if grantee.name.lower() == name:
+				if grantee.permission == "FULL_CONTROL":
+					return True
+				elif grantee.permission.upper() == permission:
+					return True
+
+		return False;
+
+	def grant(self, name, permission):
+		if self.hasGrant(name, permission):
+			return
+
+		name = name.lower()
+		permission = permission.upper()
+
+		if "ALL" == permission:
+			permission = "FULL_CONTROL"
+
+		if "FULL_CONTROL" == permission:
+			self.revoke(name, "ALL")
+
+		grantee = Grantee()
+		grantee.name = name
+		grantee.permission = permission
+
+		if  name.find('@') <= -1: # ultra lame attempt to differenciate emails id from canonical ids
+			grantee.xsi_type = "CanonicalUser"
+			grantee.tag = "ID"
+		else:
+			grantee.xsi_type = "AmazonCustomerByEmail"
+			grantee.tag = "EmailAddress"
+				
+		self.appendGrantee(grantee)
+
+
+	def revoke(self, name, permission):
+		name = name.lower()
+		permission = permission.upper()
+
+		if "ALL" == permission:
+			self.grantees = [g for g in self.grantees if not g.name.lower() == name]
+		else:
+			self.grantees = [g for g in self.grantees if not (g.name.lower() == name and g.permission.upper() ==  permission)]
+
 
 	def __str__(self):
 		tree = getTreeFromXml(ACL.EMPTY_ACL)

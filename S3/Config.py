@@ -19,7 +19,7 @@ class Config(object):
 	host_bucket = "%(bucket)s.s3.amazonaws.com"
 	simpledb_host = "sdb.amazonaws.com"
 	cloudfront_host = "cloudfront.amazonaws.com"
-	cloudfront_resource = "/2008-06-30/distribution"
+	cloudfront_resource = "/2010-07-15/distribution"
 	verbosity = logging.WARNING
 	progress_meter = True
 	progress_class = Progress.ProgressCR
@@ -29,10 +29,13 @@ class Config(object):
 	human_readable_sizes = False
 	extra_headers = SortedDict(ignore_case = True)
 	force = False
+	enable = None
 	get_continue = False
 	skip_existing = False
 	recursive = False
-	acl_public = False
+	acl_public = None
+	acl_grants = []
+	acl_revokes = []
 	proxy_host = ""
 	proxy_port = 3128
 	encrypt = False
@@ -69,6 +72,10 @@ class Config(object):
 	debug_include = {}
 	encoding = "utf-8"
 	urlencoding_mode = "normal"
+	log_target_prefix = ""
+	reduced_redundancy = False
+	follow_symlinks = False
+	socket_timeout = 10
 
 	## Creating a singleton
 	def __new__(self, configfile = None):

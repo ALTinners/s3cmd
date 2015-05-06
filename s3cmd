@@ -22,6 +22,7 @@ import codecs
 import locale
 import subprocess
 import htmlentitydefs
+import socket
 
 from copy import copy
 from optparse import OptionParser, Option, OptionValueError, IndentedHelpFormatter
@@ -35,6 +36,41 @@ def check_args_type(args, type, verbose_type):
 	for arg in args:
 		if S3Uri(arg).type != type:
 			raise ParameterError("Expecting %s instead of '%s'" % (verbose_type, arg))
+
+def _fswalk_follow_symlinks(path):
+        '''
+        Walk filesystem, following symbolic links (but without recursion), on python2.4 and later
+
+        If a recursive directory link is detected, emit a warning and skip.
+        '''
+        assert os.path.isdir(path) # only designed for directory argument
+        walkdirs = set([path])
+        targets = set()
+        for dirpath, dirnames, filenames in os.walk(path):
+                for dirname in dirnames:
+                        current = os.path.join(dirpath, dirname)
+                        target = os.path.realpath(current)
+                        if os.path.islink(current):
+                                if target in targets:
+                                        warning("Skipping recursively symlinked directory %s" % dirname)
+                                else:
+                                        walkdirs.add(current)
+                        targets.add(target)
+        for walkdir in walkdirs:
+                for value in os.walk(walkdir):
+                        yield value
+
+def fswalk(path, follow_symlinks):
+        '''
+        Directory tree generator
+
+        path (str) is the root of the directory tree to walk
+
+        follow_symlinks (bool) indicates whether to descend into symbolically linked directories
+        '''
+        if follow_symlinks:
+                return _fswalk_follow_symlinks(path)
+        return os.walk(path)
 
 def cmd_du(args):
 	s3 = S3(Config())
@@ -67,8 +103,8 @@ def subcmd_bucket_usage(s3, uri):
 	try:
 		response = s3.bucket_list(bucket, prefix = object, recursive = True)
 	except S3Error, e:
-		if S3.codes.has_key(e.Code):
-			error(S3.codes[e.Code] % bucket)
+		if S3.codes.has_key(e.info["Code"]):
+			error(S3.codes[e.info["Code"]] % bucket)
 			return
 		else:
 			raise
@@ -603,9 +639,9 @@ def cmd_info(args):
 				output(u"%s (bucket):" % uri.uri())
 				output(u"   Location:  %s" % info['bucket-location'])
 			acl = s3.get_acl(uri)
-			acl_list = acl.getGrantList()
-			for user in acl_list:
-				output(u"   ACL:       %s: %s" % (user, acl_list[user]))
+			acl_grant_list = acl.getGrantList()
+			for grant in acl_grant_list:
+				output(u"   ACL:       %s: %s" % (grant['grantee'], grant['permission']))
 			if acl.isAnonRead():
 				output(u"   URL:       %s" % uri.public_url())
 		except S3Error, e:
@@ -620,7 +656,7 @@ def _get_filelist_local(local_uri):
 	if local_uri.isdir():
 		local_base = deunicodise(local_uri.basename())
 		local_path = deunicodise(local_uri.path())
-		filelist = os.walk(local_path)
+		filelist = fswalk(local_path, cfg.follow_symlinks)
 		single_file = False
 	else:
 		local_base = ""
@@ -635,10 +671,12 @@ def _get_filelist_local(local_uri):
 			if not os.path.isfile(full_name):
 				continue
 			if os.path.islink(full_name):
-				## Synchronize symlinks... one day
-				## for now skip over
-				continue
+                                if not cfg.follow_symlinks:
+                                        continue
 			relative_file = unicodise(os.path.join(rel_root, f))
+			if os.path.sep != "/":
+				# Convert non-unix dir separators to '/'
+				relative_file = "/".join(relative_file.split(os.path.sep))
 			if cfg.urlencoding_mode == "normal":
 				relative_file = replace_nonprintables(relative_file)
 			if relative_file.startswith('./'):
@@ -733,10 +771,20 @@ def _filelist_filter_exclude_include(src_list):
 			debug(u"PASS: %s" % (file))
 	return src_list, exclude_list
 
-def _compare_filelists(src_list, dst_list, src_is_local_and_dst_is_remote):
+def _compare_filelists(src_list, dst_list, src_remote, dst_remote):
+	def __direction_str(is_remote):
+		return is_remote and "remote" or "local"
+
+	# We don't support local->local sync, use 'rsync' or something like that instead ;-)
+	assert(not(src_remote == False and dst_remote == False))
+
 	info(u"Verifying attributes...")
 	cfg = Config()
 	exists_list = SortedDict(ignore_case = False)
+
+	debug("Comparing filelists (direction: %s -> %s)" % (__direction_str(src_remote), __direction_str(dst_remote)))
+	debug("src_list.keys: %s" % src_list.keys())
+	debug("dst_list.keys: %s" % dst_list.keys())
 
 	for file in src_list.keys():
 		debug(u"CHECK: %s" % file)
@@ -758,12 +806,24 @@ def _compare_filelists(src_list, dst_list, src_is_local_and_dst_is_remote):
 			
 			if attribs_match and 'md5' in cfg.sync_checks:
 				## ... same size, check MD5
-				if src_is_local_and_dst_is_remote:
-					src_md5 = Utils.hash_file_md5(src_list[file]['full_name'])
-					dst_md5 = dst_list[file]['md5']
-				else:
-					src_md5 = src_list[file]['md5']
-					dst_md5 = Utils.hash_file_md5(dst_list[file]['full_name'])
+				try:
+					if src_remote == False and dst_remote == True:
+						src_md5 = Utils.hash_file_md5(src_list[file]['full_name'])
+						dst_md5 = dst_list[file]['md5']
+					elif src_remote == True and dst_remote == False:
+						src_md5 = src_list[file]['md5']
+						dst_md5 = Utils.hash_file_md5(dst_list[file]['full_name'])
+					elif src_remote == True and dst_remote == True:
+						src_md5 = src_list[file]['md5']
+						dst_md5 = dst_list[file]['md5']
+				except (IOError,OSError), e:
+					# MD5 sum verification failed - ignore that file altogether
+					debug(u"IGNR: %s (disappeared)" % (file))
+					warning(u"%s: file disappeared, ignoring." % (file))
+					del(src_list[file])
+					del(dst_list[file])
+					continue
+
 				if src_md5 != dst_md5:
 					## Checksums are different.
 					attribs_match = False
@@ -779,6 +839,80 @@ def _compare_filelists(src_list, dst_list, src_is_local_and_dst_is_remote):
 			del(dst_list[file])
 
 	return src_list, dst_list, exists_list
+
+def cmd_sync_remote2remote(args):
+	s3 = S3(Config())
+
+	# Normalise s3://uri (e.g. assert trailing slash)
+	destination_base = unicode(S3Uri(args[-1]))
+
+	src_list = fetch_remote_list(args[:-1], recursive = True, require_attribs = True)
+	dst_list = fetch_remote_list(destination_base, recursive = True, require_attribs = True)
+	 
+	src_count = len(src_list)
+	dst_count = len(dst_list)
+
+	info(u"Found %d source files, %d destination files" % (src_count, dst_count))
+
+	src_list, exclude_list = _filelist_filter_exclude_include(src_list)
+
+	src_list, dst_list, existing_list = _compare_filelists(src_list, dst_list, src_remote = True, dst_remote = True)
+
+	src_count = len(src_list)
+	dst_count = len(dst_list)
+
+	print(u"Summary: %d source files to copy, %d files at destination to delete" % (src_count, dst_count))
+
+	if src_count > 0:
+		### Populate 'remote_uri' only if we've got something to sync from src to dst
+		for key in src_list:
+			src_list[key]['target_uri'] = destination_base + key
+
+	if cfg.dry_run:
+		for key in exclude_list:
+			output(u"exclude: %s" % unicodise(key))
+		if cfg.delete_removed:
+			for key in dst_list:
+				output(u"delete: %s" % dst_list[key]['object_uri_str'])
+		for key in src_list:
+			output(u"Sync: %s -> %s" % (src_list[key]['object_uri_str'], src_list[key]['target_uri']))
+		warning(u"Exitting now because of --dry-run")
+		return
+
+	# Delete items in destination that are not in source
+	if cfg.delete_removed:
+		if cfg.dry_run:
+			for key in dst_list:
+				output(u"delete: %s" % dst_list[key]['object_uri_str'])
+		else:
+			for key in dst_list:
+				uri = S3Uri(dst_list[key]['object_uri_str'])
+				s3.object_delete(uri)
+				output(u"deleted: '%s'" % uri)
+	
+	# Perform the synchronization of files
+	timestamp_start = time.time()
+	seq = 0
+	file_list = src_list.keys()
+	file_list.sort()
+	for file in file_list:
+		seq += 1
+		item = src_list[file]
+		src_uri = S3Uri(item['object_uri_str'])
+		dst_uri = S3Uri(item['target_uri'])
+		seq_label = "[%d of %d]" % (seq, src_count)
+		extra_headers = copy(cfg.extra_headers)
+		try:
+			response = s3.object_copy(src_uri, dst_uri, extra_headers)
+			output("File %(src)s copied to %(dst)s" % { "src" : src_uri, "dst" : dst_uri })
+		except S3Error, e:
+			error("File %(src)s could not be copied: %(e)s" % { "src" : src_uri, "e" : e })
+	total_elapsed = time.time() - timestamp_start
+	outstr = "Done. Copied %d files in %0.1f seconds, %0.2f files/s" % (seq, total_elapsed, seq/total_elapsed)
+	if seq > 0:
+		output(outstr)
+	else:
+		info(outstr)
 
 def cmd_sync_remote2local(args):
 	def _parse_attrs_header(attrs_header):
@@ -801,7 +935,7 @@ def cmd_sync_remote2local(args):
 
 	remote_list, exclude_list = _filelist_filter_exclude_include(remote_list)
 
-	remote_list, local_list, existing_list = _compare_filelists(remote_list, local_list, False)
+	remote_list, local_list, existing_list = _compare_filelists(remote_list, local_list, src_remote = True, dst_remote = False)
 
 	local_count = len(local_list)
 	remote_count = len(remote_list)
@@ -817,7 +951,10 @@ def cmd_sync_remote2local(args):
 		if destination_base[-1] != os.path.sep:
 			destination_base += os.path.sep
 		for key in remote_list:
-			remote_list[key]['local_filename'] = deunicodise(destination_base + key)
+			local_filename = destination_base + key
+			if os.path.sep != "/":
+				local_filename = os.path.sep.join(local_filename.split("/"))
+			remote_list[key]['local_filename'] = deunicodise(local_filename)
 
 	if cfg.dry_run:
 		for key in exclude_list:
@@ -886,6 +1023,9 @@ def cmd_sync_remote2local(args):
 				if e.errno in (errno.EPERM, errno.EACCES):
 					warning(u"%s not writable: %s" % (dst_file, e.strerror))
 					continue
+				if e.errno == errno.EISDIR:
+					warning(u"%s is a directory - skipping over" % dst_file)
+					continue
 				raise e
 			except KeyboardInterrupt:
 				try: dst_stream.close()
@@ -928,7 +1068,10 @@ def cmd_sync_local2remote(args):
 		import pwd, grp
 		attrs = {}
 		src = deunicodise(src)
-		st = os.stat_result(os.stat(src))
+		try:
+			st = os.stat_result(os.stat(src))
+		except OSError, e:
+			raise InvalidFileError(u"%s: %s" % (unicodise(src), e.strerror))
 		for attr in cfg.preserve_attrs_list:
 			if attr == 'uname':
 				try:
@@ -981,7 +1124,7 @@ def cmd_sync_local2remote(args):
 		# Flush remote_list, by the way
 		remote_list = { local_list.keys()[0] : remote_list_entry }
 
-	local_list, remote_list, existing_list = _compare_filelists(local_list, remote_list, True)
+	local_list, remote_list, existing_list = _compare_filelists(local_list, remote_list, src_remote = False, dst_remote = True)
 
 	local_count = len(local_list)
 	remote_count = len(remote_list)
@@ -1029,17 +1172,17 @@ def cmd_sync_local2remote(args):
 		uri = S3Uri(item['remote_uri'])
 		seq_label = "[%d of %d]" % (seq, local_count)
 		extra_headers = copy(cfg.extra_headers)
-		if cfg.preserve_attrs:
-			attr_header = _build_attr_header(src)
-			debug(u"attr_header: %s" % attr_header)
-			extra_headers.update(attr_header)
 		try:
+			if cfg.preserve_attrs:
+				attr_header = _build_attr_header(src)
+				debug(u"attr_header: %s" % attr_header)
+				extra_headers.update(attr_header)
 			response = s3.object_put(src, uri, extra_headers, extra_label = seq_label)
-		except S3UploadError, e:
-			error(u"%s: upload failed too many times. Skipping that file." % item['full_name_unicode'])
-			continue
 		except InvalidFileError, e:
 			warning(u"File can not be uploaded: %s" % e)
+			continue
+		except S3UploadError, e:
+			error(u"%s: upload failed too many times. Skipping that file." % item['full_name_unicode'])
 			continue
 		speed_fmt = formatSize(response["speed"], human_readable = True, floating_point = True)
 		if not cfg.progress_meter:
@@ -1068,12 +1211,68 @@ def cmd_sync(args):
 		return cmd_sync_local2remote(args)
 	if S3Uri(args[0]).type == "s3" and S3Uri(args[-1]).type == "file":
 		return cmd_sync_remote2local(args)
+	if S3Uri(args[0]).type == "s3" and S3Uri(args[-1]).type == "s3":
+		return cmd_sync_remote2remote(args)
 	raise ParameterError("Invalid source/destination: '%s'" % "' '".join(args))
 
 def cmd_setacl(args):
+	def _update_acl(uri, seq_label = ""):
+		something_changed = False
+		acl = s3.get_acl(uri)
+		debug(u"acl: %s - %r" % (uri, acl.grantees))
+		if cfg.acl_public == True:
+			if acl.isAnonRead():
+				info(u"%s: already Public, skipping %s" % (uri, seq_label))
+			else:
+				acl.grantAnonRead()
+				something_changed = True
+		elif cfg.acl_public == False: # we explicitely check for False, because it could be None
+			if not acl.isAnonRead():
+				info(u"%s: already Private, skipping %s" % (uri, seq_label))
+			else:
+				acl.revokeAnonRead()
+				something_changed = True
+
+		# update acl with arguments
+		# grant first and revoke later, because revoke has priority
+		if cfg.acl_grants:
+			something_changed = True
+			for grant in cfg.acl_grants:
+				acl.grant(**grant);
+
+		if cfg.acl_revokes:
+			something_changed = True
+			for revoke in cfg.acl_revokes:
+				acl.revoke(**revoke);
+
+		if not something_changed:
+			return
+
+		retsponse = s3.set_acl(uri, acl)
+		if retsponse['status'] == 200:
+			if cfg.acl_public in (True, False):
+				output(u"%s: ACL set to %s  %s" % (uri, set_to_acl, seq_label))
+			else:
+				output(u"%s: ACL updated" % uri)
+
 	s3 = S3(cfg)
 
 	set_to_acl = cfg.acl_public and "Public" or "Private"
+
+	if not cfg.recursive:
+		old_args = args
+		args = []
+		for arg in old_args:
+			uri = S3Uri(arg)
+			if not uri.has_object():
+				if cfg.acl_public != None:
+					info("Setting bucket-level ACL for %s to %s" % (uri.uri(), set_to_acl))
+				else:
+					info("Setting bucket-level ACL for %s" % (uri.uri()))
+				if not cfg.dry_run:
+					_update_acl(uri)
+			else:
+				args.append(arg)
 
 	remote_list = fetch_remote_list(args)
 	remote_list, exclude_list = _filelist_filter_exclude_include(remote_list)
@@ -1096,22 +1295,29 @@ def cmd_setacl(args):
 		seq += 1
 		seq_label = "[%d of %d]" % (seq, remote_count)
 		uri = S3Uri(remote_list[key]['object_uri_str'])
-		acl = s3.get_acl(uri)
-		debug(u"acl: %s - %r" % (uri, acl.grantees))
-		if cfg.acl_public:
-			if acl.isAnonRead():
-				info(u"%s: already Public, skipping %s" % (uri, seq_label))
-				continue
-			acl.grantAnonRead()
-		else:
-			if not acl.isAnonRead():
-				info(u"%s: already Private, skipping %s" % (uri, seq_label))
-				continue
-			acl.revokeAnonRead()
-		retsponse = s3.set_acl(uri, acl)
-		if retsponse['status'] == 200:
-			output(u"%s: ACL set to %s  %s" % (uri, set_to_acl, seq_label))
+		_update_acl(uri, seq_label)
 
+def cmd_accesslog(args):
+	s3 = S3(cfg)
+	bucket_uri = S3Uri(args.pop())
+	if bucket_uri.object():
+		raise ParameterError("Only bucket name is required for [accesslog] command")
+	if cfg.log_target_prefix == False:
+		accesslog, response = s3.set_accesslog(bucket_uri, enable = False)
+	elif cfg.log_target_prefix:
+		log_target_prefix_uri = S3Uri(cfg.log_target_prefix)
+		if log_target_prefix_uri.type != "s3":
+			raise ParameterError("--log-target-prefix must be a S3 URI")
+		accesslog, response = s3.set_accesslog(bucket_uri, enable = True, log_target_prefix_uri = log_target_prefix_uri, acl_public = cfg.acl_public)
+	else:	# cfg.log_target_prefix == None
+		accesslog = s3.get_accesslog(bucket_uri)
+
+	output(u"Access logging for: %s" % bucket_uri.uri())
+	output(u"   Logging Enabled: %s" % accesslog.isLoggingEnabled())
+	if accesslog.isLoggingEnabled():
+		output(u"     Target prefix: %s" % accesslog.targetPrefix().uri())
+		#output(u"   Public Access:   %s" % accesslog.isAclPublic())
+		
 def cmd_sign(args):
 	string_to_sign = args.pop()
 	debug("string-to-sign: %r" % string_to_sign)
@@ -1147,6 +1353,7 @@ def cmd_fixbucket(args):
 				except KeyError:
 					pass
 			return text # leave as is
+			text = text.encode('ascii', 'xmlcharrefreplace')
 		return re.sub("&#?\w+;", _unescape_fixup, text)
 
 	cfg.urlencoding_mode = "fixbucket"
@@ -1159,6 +1366,7 @@ def cmd_fixbucket(args):
 			raise ParameterError("Expecting S3Uri instead of: %s" % arg)
 		response = s3.bucket_list_noparse(culprit.bucket(), culprit.object(), recursive = True)
 		r_xent = re.compile("&#x[\da-fA-F]+;")
+		response['data'] = unicode(response['data'], 'UTF-8')
 		keys = re.findall("<Key>(.*?)</Key>", response['data'], re.MULTILINE)
 		debug("Keys: %r" % keys)
 		for key in keys:
@@ -1416,6 +1624,7 @@ def get_commands_list():
 	{"cmd":"cp", "label":"Copy object", "param":"s3://BUCKET1/OBJECT1 s3://BUCKET2[/OBJECT2]", "func":cmd_cp, "argc":2},
 	{"cmd":"mv", "label":"Move object", "param":"s3://BUCKET1/OBJECT1 s3://BUCKET2[/OBJECT2]", "func":cmd_mv, "argc":2},
 	{"cmd":"setacl", "label":"Modify Access control list for Bucket or Files", "param":"s3://BUCKET[/OBJECT]", "func":cmd_setacl, "argc":1},
+	{"cmd":"accesslog", "label":"Enable/disable bucket access logging", "param":"s3://BUCKET", "func":cmd_accesslog, "argc":1},
 	{"cmd":"sign", "label":"Sign arbitrary string using the secret key", "param":"STRING-TO-SIGN", "func":cmd_sign, "argc":1},
 	{"cmd":"fixbucket", "label":"Fix invalid file names in a bucket", "param":"s3://BUCKET[/PREFIX]", "func":cmd_fixbucket, "argc":1},
 
@@ -1439,9 +1648,26 @@ class OptionMimeType(Option):
 			return value
 		raise OptionValueError("option %s: invalid MIME-Type format: %r" % (opt, value))
 
-	TYPES = Option.TYPES + ("mimetype",)
+class OptionS3ACL(Option):
+	def check_s3acl(option, opt, value):
+		permissions = ('read', 'write', 'read_acp', 'write_acp', 'full_control', 'all')
+		try:
+			permission, grantee = re.compile("^(\w+):(.+)$", re.IGNORECASE).match(value).groups()
+			if not permission or not grantee:
+				raise
+			if permission in permissions:
+				return { 'name' : grantee, 'permission' : permission.upper() }
+			else:
+				raise OptionValueError("option %s: invalid S3 ACL permission: %s (valid values: %s)" % 
+					(opt, permission, ", ".join(permissions)))
+		except:
+			raise OptionValueError("option %s: invalid S3 ACL format: %r" % (opt, value))
+
+class OptionAll(OptionMimeType, OptionS3ACL):
 	TYPE_CHECKER = copy(Option.TYPE_CHECKER)
-	TYPE_CHECKER["mimetype"] = check_mimetype
+	TYPE_CHECKER["mimetype"] = OptionMimeType.check_mimetype
+	TYPE_CHECKER["s3acl"] = OptionS3ACL.check_s3acl
+	TYPES = Option.TYPES + ("mimetype", "s3acl")
 
 class MyHelpFormatter(IndentedHelpFormatter):
 	def format_epilog(self, epilog):
@@ -1462,14 +1688,14 @@ def main():
 			commands[cmd["cmd"]] = cmd
 
 	default_verbosity = Config().verbosity
-	optparser = OptionParser(option_class=OptionMimeType, formatter=MyHelpFormatter())
+	optparser = OptionParser(option_class=OptionAll, formatter=MyHelpFormatter())
 	#optparser.disable_interspersed_args()
 
 	config_file = None
 	if os.getenv("HOME"):
 		config_file = os.path.join(os.getenv("HOME"), ".s3cfg")
 	elif os.name == "nt" and os.getenv("USERPROFILE"):
-		config_file = os.path.join(os.getenv("USERPROFILE"), "Application Data", "s3cmd.ini")
+		config_file = os.path.join(os.getenv("USERPROFILE").decode('mbcs'), "Application Data", "s3cmd.ini")
 
 	preferred_encoding = locale.getpreferredencoding() or "UTF-8"
 
@@ -1489,8 +1715,13 @@ def main():
 	optparser.add_option(      "--continue", dest="get_continue", action="store_true", help="Continue getting a partially downloaded file (only for [get] command).")
 	optparser.add_option(      "--skip-existing", dest="skip_existing", action="store_true", help="Skip over files that exist at the destination (only for [get] and [sync] commands).")
 	optparser.add_option("-r", "--recursive", dest="recursive", action="store_true", help="Recursive upload, download or removal.")
+	optparser.add_option(      "--check-md5", dest="check_md5", action="store_true", help="Check MD5 sums when comparing files for [sync]. (default)")
+	optparser.add_option(      "--no-check-md5", dest="check_md5", action="store_false", help="Do not check MD5 sums when comparing files for [sync]. Only size will be compared. May significantly speed up transfer but may also miss some changed files.")
 	optparser.add_option("-P", "--acl-public", dest="acl_public", action="store_true", help="Store objects with ACL allowing read for anyone.")
 	optparser.add_option(      "--acl-private", dest="acl_public", action="store_false", help="Store objects with default ACL allowing access for you only.")
+	optparser.add_option(      "--acl-grant", dest="acl_grants", type="s3acl", action="append", metavar="PERMISSION:EMAIL or USER_CANONICAL_ID", help="Grant stated permission to a given amazon user. Permission is one of: read, write, read_acp, write_acp, full_control, all")
+	optparser.add_option(      "--acl-revoke", dest="acl_revokes", type="s3acl", action="append", metavar="PERMISSION:USER_CANONICAL_ID", help="Revoke stated permission for a given amazon user. Permission is one of: read, write, read_acp, wr     ite_acp, full_control, all")
+
 	optparser.add_option(      "--delete-removed", dest="delete_removed", action="store_true", help="Delete remote objects with no corresponding local file [sync]")
 	optparser.add_option(      "--no-delete-removed", dest="delete_removed", action="store_false", help="Don't delete remote objects.")
 	optparser.add_option("-p", "--preserve", dest="preserve_attrs", action="store_true", help="Preserve filesystem attributes (mode, ownership, timestamps). Default for [sync] command.")
@@ -1504,7 +1735,11 @@ def main():
 	optparser.add_option(      "--rinclude", dest="rinclude", action="append", metavar="REGEXP", help="Same as --include but uses REGEXP (regular expression) instead of GLOB")
 	optparser.add_option(      "--rinclude-from", dest="rinclude_from", action="append", metavar="FILE", help="Read --rinclude REGEXPs from FILE")
 
-	optparser.add_option(      "--bucket-location", dest="bucket_location", help="Datacentre to create bucket in. Either EU or US (default)")
+	optparser.add_option(      "--bucket-location", dest="bucket_location", help="Datacentre to create bucket in. As of now the datacenters are: US (default), EU, us-west-1, and ap-southeast-1")
+	optparser.add_option(      "--reduced-redundancy", "--rr", dest="reduced_redundancy", action="store_true", help="Store object with 'Reduced redundancy'. Lower per-GB price. [put, cp, mv]")
+
+	optparser.add_option(      "--access-logging-target-prefix", dest="log_target_prefix", help="Target prefix for access logs (S3 URI) (for [cfmodify] and [accesslog] commands)")
+	optparser.add_option(      "--no-access-logging", dest="log_target_prefix", action="store_false", help="Disable access logging (for [cfmodify] and [accesslog] commands)")
 
 	optparser.add_option("-m", "--mime-type", dest="default_mime_type", type="mimetype", metavar="MIME/TYPE", help="Default MIME-type to be set for objects stored.")
 	optparser.add_option("-M", "--guess-mime-type", dest="guess_mime_type", action="store_true", help="Guess MIME-type of files by their extension. Falls back to default MIME-Type as specified by --mime-type option")
@@ -1519,14 +1754,16 @@ def main():
 
 	optparser.add_option(      "--progress", dest="progress_meter", action="store_true", help="Display progress meter (default on TTY).")
 	optparser.add_option(      "--no-progress", dest="progress_meter", action="store_false", help="Don't display progress meter (default on non-TTY).")
-	optparser.add_option(      "--enable", dest="cf_enable", action="store_true", help="Enable given CloudFront distribution (only for [cfmodify] command)")
-	optparser.add_option(      "--disable", dest="cf_enable", action="store_false", help="Enable given CloudFront distribution (only for [cfmodify] command)")
+	optparser.add_option(      "--enable", dest="enable", action="store_true", help="Enable given CloudFront distribution (only for [cfmodify] command)")
+	optparser.add_option(      "--disable", dest="enable", action="store_false", help="Enable given CloudFront distribution (only for [cfmodify] command)")
 	optparser.add_option(      "--cf-add-cname", dest="cf_cnames_add", action="append", metavar="CNAME", help="Add given CNAME to a CloudFront distribution (only for [cfcreate] and [cfmodify] commands)")
 	optparser.add_option(      "--cf-remove-cname", dest="cf_cnames_remove", action="append", metavar="CNAME", help="Remove given CNAME from a CloudFront distribution (only for [cfmodify] command)")
 	optparser.add_option(      "--cf-comment", dest="cf_comment", action="store", metavar="COMMENT", help="Set COMMENT for a given CloudFront distribution (only for [cfcreate] and [cfmodify] commands)")
+	optparser.add_option(      "--cf-default-root-object", dest="cf_default_root_object", action="store", metavar="DEFAULT_ROOT_OBJECT", help="Set the default root object to return when no object is specified in the URL. Use a relative path, i.e. default/index.html instead of /default/index.html or s3://bucket/default/index.html (only for [cfcreate] and [cfmodify] commands)")
 	optparser.add_option("-v", "--verbose", dest="verbosity", action="store_const", const=logging.INFO, help="Enable verbose output.")
 	optparser.add_option("-d", "--debug", dest="verbosity", action="store_const", const=logging.DEBUG, help="Enable debug output.")
 	optparser.add_option(      "--version", dest="show_version", action="store_true", help="Show s3cmd version (%s) and exit." % (PkgInfo.version))
+	optparser.add_option("-F", "--follow-symlinks", dest="follow_symlinks", action="store_true", default=False, help="Follow symbolic links as if they are regular files")
 
 	optparser.set_usage(optparser.usage + " COMMAND [parameters]")
 	optparser.set_description('S3cmd is a tool for managing objects in '+
@@ -1534,7 +1771,8 @@ def main():
 		'"buckets" and uploading, downloading and removing '+
 		'"objects" from these buckets.')
 	optparser.epilog = format_commands(optparser.get_prog_name(), commands_list)
-	optparser.epilog += ("\nSee program homepage for more information at\n%s\n" % PkgInfo.url)
+	optparser.epilog += ("\nFor more informations see the progect homepage:\n%s\n" % PkgInfo.url)
+	optparser.epilog += ("\nConsider a donation if you have found s3cmd useful:\n%s/donate\n" % PkgInfo.url)
 
 	(options, args) = optparser.parse_args()
 
@@ -1598,6 +1836,24 @@ def main():
 			debug(u"Updating Config.Config extra_headers[%s] -> %s" % (key.strip(), val.strip()))
 			cfg.extra_headers[key.strip()] = val.strip()
 
+	## --acl-grant/--acl-revoke arguments are pre-parsed by OptionS3ACL()
+	if options.acl_grants:
+		for grant in options.acl_grants:
+			cfg.acl_grants.append(grant)
+
+	if options.acl_revokes:
+		for grant in options.acl_revokes:
+			cfg.acl_revokes.append(grant)
+
+	## Process --(no-)check-md5
+	if options.check_md5 == False:
+		try:
+			cfg.sync_checks.remove("md5")
+		except:
+			pass
+	if options.check_md5 == True and cfg.sync_checks.count("md5") == 0:
+		cfg.sync_checks.append("md5")
+
 	## Update Config with other parameters
 	for option in cfg.option_list():
 		try:
@@ -1607,7 +1863,17 @@ def main():
 		except AttributeError:
 			## Some Config() options are not settable from command line
 			pass
-	
+
+	## Special handling for tri-state options (True, False, None)
+	cfg.update_option("enable", options.enable)
+	cfg.update_option("acl_public", options.acl_public)
+
+	## CloudFront's cf_enable and Config's enable share the same --enable switch
+	options.cf_enable = options.enable
+
+	## CloudFront's cf_logging and Config's log_target_prefix share the same --log-target-prefix switch
+	options.cf_logging = options.log_target_prefix
+
 	## Update CloudFront options if some were set
 	for option in CfCmd.options.option_list():
 		try:
@@ -1641,6 +1907,9 @@ def main():
 	patterns_list, patterns_textual = process_patterns(options.rinclude, options.rinclude_from, is_glob = False, option_txt = "rinclude")
 	cfg.include.extend(patterns_list)
 	cfg.debug_include.update(patterns_textual)
+
+	## Set socket read()/write() timeout
+	socket.setdefaulttimeout(cfg.socket_timeout)
 
 	if cfg.encrypt and cfg.gpg_passphrase == "":
 		error(u"Encryption requested but no passphrase set in config file.")
@@ -1725,11 +1994,12 @@ if __name__ == '__main__':
 		## detect any syntax errors in there
 		from S3.Exceptions import *
 		from S3 import PkgInfo
-		from S3.S3 import *
+		from S3.S3 import S3
 		from S3.Config import Config
-		from S3.S3Uri import *
+		from S3.SortedDict import SortedDict
+		from S3.S3Uri import S3Uri
 		from S3 import Utils
-		from S3.Utils import unicodise
+		from S3.Utils import *
 		from S3.Progress import Progress
 		from S3.CloudFront import Cmd as CfCmd
 

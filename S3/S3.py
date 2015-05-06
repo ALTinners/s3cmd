@@ -9,6 +9,7 @@ import time
 import httplib
 import logging
 import mimetypes
+import re
 from logging import debug, info, warning, error
 from stat import ST_SIZE
 
@@ -22,8 +23,11 @@ from SortedDict import SortedDict
 from BidirMap import BidirMap
 from Config import Config
 from Exceptions import *
-from ACL import ACL
+from ACL import ACL, GranteeLogDelivery
+from AccessLog import AccessLog
+from S3Uri import S3Uri
 
+__all__ = []
 class S3Request(object):
 	def __init__(self, s3, method_string, resource, headers, params = {}):
 		self.s3 = s3
@@ -131,11 +135,11 @@ class S3(object):
 				return httplib.HTTPConnection(self.get_hostname(bucket))
 
 	def get_hostname(self, bucket):
-		if bucket and self.check_bucket_name_dns_conformity(bucket):
+		if bucket and check_bucket_name_dns_conformity(bucket):
 			if self.redir_map.has_key(bucket):
 				host = self.redir_map[bucket]
 			else:
-				host = self.config.host_bucket % { 'bucket' : bucket }
+				host = getHostnameFromBucket(bucket)
 		else:
 			host = self.config.host_base
 		debug('get_hostname(%s): %s' % (bucket, host))
@@ -145,7 +149,7 @@ class S3(object):
 		self.redir_map[bucket] = redir_hostname
 
 	def format_uri(self, resource):
-		if resource['bucket'] and not self.check_bucket_name_dns_conformity(resource['bucket']):
+		if resource['bucket'] and not check_bucket_name_dns_conformity(resource['bucket']):
 			uri = "/%s%s" % (resource['bucket'], resource['uri'])
 		else:
 			uri = resource['uri']
@@ -174,15 +178,25 @@ class S3(object):
 			return getListFromXml(data, "CommonPrefixes")
 
 		uri_params = {}
-		response = self.bucket_list_noparse(bucket, prefix, recursive, uri_params)
-		list = _get_contents(response["data"])
-		prefixes = _get_common_prefixes(response["data"])
-		while _list_truncated(response["data"]):
-			uri_params['marker'] = self.urlencode_string(list[-1]["Key"])
-			debug("Listing continues after '%s'" % uri_params['marker'])
+		truncated = True
+		list = []
+		prefixes = []
+
+		while truncated:
 			response = self.bucket_list_noparse(bucket, prefix, recursive, uri_params)
-			list += _get_contents(response["data"])
-			prefixes += _get_common_prefixes(response["data"])
+			current_list = _get_contents(response["data"])
+			current_prefixes = _get_common_prefixes(response["data"])
+			truncated = _list_truncated(response["data"])
+			if truncated:
+				if current_list:
+					uri_params['marker'] = self.urlencode_string(current_list[-1]["Key"])
+				else:
+					uri_params['marker'] = self.urlencode_string(current_prefixes[-1]["Prefix"])
+				debug("Listing continues after '%s'" % uri_params['marker'])
+
+			list += current_list
+			prefixes += current_prefixes
+
 		response['list'] = list
 		response['common_prefixes'] = prefixes
 		return response
@@ -201,13 +215,18 @@ class S3(object):
 		headers = SortedDict(ignore_case = True)
 		body = ""
 		if bucket_location and bucket_location.strip().upper() != "US":
+			bucket_location = bucket_location.strip()
+			if bucket_location.upper() == "EU":
+				bucket_location = bucket_location.upper()
+			else:
+				bucket_location = bucket_location.lower()
 			body  = "<CreateBucketConfiguration><LocationConstraint>"
-			body += bucket_location.strip().upper()
+			body += bucket_location
 			body += "</LocationConstraint></CreateBucketConfiguration>"
 			debug("bucket_location: " + body)
-			self.check_bucket_name(bucket, dns_strict = True)
+			check_bucket_name(bucket, dns_strict = True)
 		else:
-			self.check_bucket_name(bucket, dns_strict = False)
+			check_bucket_name(bucket, dns_strict = False)
 		if self.config.acl_public:
 			headers["x-amz-acl"] = "public-read"
 		request = self.create_request("BUCKET_CREATE", bucket = bucket, headers = headers)
@@ -236,7 +255,7 @@ class S3(object):
 		try:
 			file = open(filename, "rb")
 			size = os.stat(filename)[ST_SIZE]
-		except IOError, e:
+		except (IOError, OSError), e:
 			raise InvalidFileError(u"%s: %s" % (unicodise(filename), e.strerror))
 		headers = SortedDict(ignore_case = True)
 		if extra_headers:
@@ -251,6 +270,8 @@ class S3(object):
 		headers["content-type"] = content_type
 		if self.config.acl_public:
 			headers["x-amz-acl"] = "public-read"
+		if self.config.reduced_redundancy:
+			headers["x-amz-storage-class"] = "REDUCED_REDUNDANCY"
 		request = self.create_request("OBJECT_PUT", uri = uri, headers = headers)
 		labels = { 'source' : unicodise(filename), 'destination' : unicodise(uri.uri()), 'extra' : extra_label }
 		response = self.send_file(request, file, labels)
@@ -282,6 +303,8 @@ class S3(object):
 		headers['x-amz-metadata-directive'] = "COPY"
 		if self.config.acl_public:
 			headers["x-amz-acl"] = "public-read"
+		if self.config.reduced_redundancy:
+			headers["x-amz-storage-class"] = "REDUCED_REDUNDANCY"
 		# if extra_headers:
 		# 	headers.update(extra_headers)
 		request = self.create_request("OBJECT_PUT", uri = dst_uri, headers = headers)
@@ -321,6 +344,41 @@ class S3(object):
 		debug(u"set_acl(%s): acl-xml: %s" % (uri, body))
 		response = self.send_request(request, body)
 		return response
+
+	def get_accesslog(self, uri):
+		request = self.create_request("BUCKET_LIST", bucket = uri.bucket(), extra = "?logging")
+		response = self.send_request(request)
+		accesslog = AccessLog(response['data'])
+		return accesslog
+
+	def set_accesslog_acl(self, uri):
+		acl = self.get_acl(uri)
+		debug("Current ACL(%s): %s" % (uri.uri(), str(acl)))
+		acl.appendGrantee(GranteeLogDelivery("READ_ACP"))
+		acl.appendGrantee(GranteeLogDelivery("WRITE"))
+		debug("Updated ACL(%s): %s" % (uri.uri(), str(acl)))
+		self.set_acl(uri, acl)
+
+	def set_accesslog(self, uri, enable, log_target_prefix_uri = None, acl_public = False):
+		request = self.create_request("BUCKET_CREATE", bucket = uri.bucket(), extra = "?logging")
+		accesslog = AccessLog()
+		if enable:
+			accesslog.enableLogging(log_target_prefix_uri)
+			accesslog.setAclPublic(acl_public)
+		else:
+			accesslog.disableLogging()
+		body = str(accesslog)
+		debug(u"set_accesslog(%s): accesslog-xml: %s" % (uri, body))
+		try:
+			response = self.send_request(request, body)
+		except S3Error, e:
+			if e.info['Code'] == "InvalidTargetBucketForLogging":
+				info("Setting up log-delivery ACL for target bucket.")
+				self.set_accesslog_acl(S3Uri("s3://%s" % log_target_prefix_uri.bucket()))
+				response = self.send_request(request, body)
+			else:
+				raise
+		return accesslog, response
 
 	## Low level methods
 	def urlencode_string(self, string, urlencoding_mode = None):
@@ -408,6 +466,9 @@ class S3(object):
 		if not headers.has_key('content-length'):
 			headers['content-length'] = body and len(body) or 0
 		try:
+			# "Stringify" all headers
+			for header in headers.keys():
+				headers[header] = str(headers[header])
 			conn = self.get_connection(resource['bucket'])
 			conn.request(method_string, self.format_uri(resource), body, headers)
 			response = {}
@@ -541,8 +602,17 @@ class S3(object):
 			response['headers']['etag'] = '' 
 
 		if response["status"] < 200 or response["status"] > 299:
+			try_retry = False
 			if response["status"] >= 500:
 				## AWS internal error - retry
+				try_retry = True
+			elif response["status"] >= 400:
+				err = S3Error(response)
+				## Retriable client error?
+				if err.code in [ 'BadDigest', 'OperationAborted', 'TokenRefreshRequired', 'RequestTimeout' ]:
+					try_retry = True
+
+			if try_retry:
 				if retries:
 					warning("Upload failed: %s (%s)" % (resource['uri'], S3Error(response)))
 					warning("Waiting %d sec..." % self._fail_wait(retries))
@@ -551,6 +621,7 @@ class S3(object):
 				else:
 					warning("Too many failures. Giving up on '%s'" % (file.name))
 					raise S3UploadError
+
 			## Non-recoverable error
 			raise S3Error(response)
 
@@ -685,38 +756,4 @@ class S3(object):
 			warning("MD5 signatures do not match: computed=%s, received=%s" % (
 				response["md5"], response["headers"]["etag"]))
 		return response
-
-	@staticmethod
-	def check_bucket_name(bucket, dns_strict = True):
-		if dns_strict:
-			invalid = re.search("([^a-z0-9\.-])", bucket)
-			if invalid:
-				raise ParameterError("Bucket name '%s' contains disallowed character '%s'. The only supported ones are: lowercase us-ascii letters (a-z), digits (0-9), dot (.) and hyphen (-)." % (bucket, invalid.groups()[0]))
-		else:
-			invalid = re.search("([^A-Za-z0-9\._-])", bucket)
-			if invalid:
-				raise ParameterError("Bucket name '%s' contains disallowed character '%s'. The only supported ones are: us-ascii letters (a-z, A-Z), digits (0-9), dot (.), hyphen (-) and underscore (_)." % (bucket, invalid.groups()[0]))
-
-		if len(bucket) < 3:
-			raise ParameterError("Bucket name '%s' is too short (min 3 characters)" % bucket)
-		if len(bucket) > 255:
-			raise ParameterError("Bucket name '%s' is too long (max 255 characters)" % bucket)
-		if dns_strict:
-			if len(bucket) > 63:
-				raise ParameterError("Bucket name '%s' is too long (max 63 characters)" % bucket)
-			if re.search("-\.", bucket):
-				raise ParameterError("Bucket name '%s' must not contain sequence '-.' for DNS compatibility" % bucket)
-			if re.search("\.\.", bucket):
-				raise ParameterError("Bucket name '%s' must not contain sequence '..' for DNS compatibility" % bucket)
-			if not re.search("^[0-9a-z]", bucket):
-				raise ParameterError("Bucket name '%s' must start with a letter or a digit" % bucket)
-			if not re.search("[0-9a-z]$", bucket):
-				raise ParameterError("Bucket name '%s' must end with a letter or a digit" % bucket)
-		return True
-
-	@staticmethod
-	def check_bucket_name_dns_conformity(bucket):
-		try:
-			return S3.check_bucket_name(bucket, dns_strict = True)
-		except ParameterError:
-			return False
+__all__.append("S3")
