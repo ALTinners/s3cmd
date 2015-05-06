@@ -11,6 +11,8 @@ import random
 import md5
 import errno
 
+from logging import debug, info, warning, error
+
 try:
 	import xml.etree.ElementTree as ET
 except ImportError:
@@ -79,8 +81,8 @@ def dateS3toUnix(date):
 	## treats it as "localtime". Anyway...
 	return time.mktime(dateS3toPython(date))
 
-def formatSize(size, human_readable = False):
-	size = int(size)
+def formatSize(size, human_readable = False, floating_point = False):
+	size = floating_point and float(size) or int(size)
 	if human_readable:
 		coeffs = ['k', 'M', 'G', 'T']
 		coeff = ""
@@ -140,3 +142,29 @@ def hash_file_md5(filename):
 	h.update(f.read())
 	f.close()
 	return h.hexdigest()
+
+def mkdir_with_parents(dir_name):
+	"""
+	mkdir_with_parents(dst_dir)
+	
+	Create directory 'dir_name' with all parent directories
+
+	Returns True on success, False otherwise.
+	"""
+	pathmembers = dir_name.split(os.sep)
+	tmp_stack = []
+	while pathmembers and not os.path.isdir(os.sep.join(pathmembers)):
+		tmp_stack.append(pathmembers.pop())
+	while tmp_stack:
+		pathmembers.append(tmp_stack.pop())
+		cur_dir = os.sep.join(pathmembers)
+		try:
+			debug("mkdir(%s)" % cur_dir)
+			os.mkdir(cur_dir)
+		except (OSError, IOError), e:
+			warning("%s: can not make directory: %s" % (cur_dir, e.strerror))
+			return False
+		except Exception, e:
+			warning("%s: %s" % (cur_dir, e))
+			return False
+	return True

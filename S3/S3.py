@@ -19,33 +19,7 @@ from Utils import *
 from SortedDict import SortedDict
 from BidirMap import BidirMap
 from Config import Config
-
-class S3Error (Exception):
-	def __init__(self, response):
-		self.status = response["status"]
-		self.reason = response["reason"]
-		self.info = {}
-		debug("S3Error: %s (%s)" % (self.status, self.reason))
-		if response.has_key("headers"):
-			for header in response["headers"]:
-				debug("HttpHeader: %s: %s" % (header, response["headers"][header]))
-		if response.has_key("data"):
-			tree = ET.fromstring(response["data"])
-			for child in tree.getchildren():
-				if child.text != "":
-					debug("ErrorXML: " + child.tag + ": " + repr(child.text))
-					self.info[child.tag] = child.text
-
-	def __str__(self):
-		retval = "%d (%s)" % (self.status, self.reason)
-		try:
-			retval += (": %s" % self.info["Code"])
-		except (AttributeError, KeyError):
-			pass
-		return retval
-
-class ParameterError(Exception):
-	pass
+from Exceptions import *
 
 class S3(object):
 	http_methods = BidirMap(
@@ -199,38 +173,26 @@ class S3(object):
 			headers["x-amz-acl"] = "public-read"
 		request = self.create_request("OBJECT_PUT", bucket = bucket, object = object, headers = headers)
 		response = self.send_file(request, file)
-		response["size"] = size
 		return response
 
-	def object_get_file(self, bucket, object, filename):
-		try:
-			stream = open(filename, "wb")
-		except IOError, e:
-			raise ParameterError("%s: %s" % (filename, e.strerror))
-		return self.object_get_stream(bucket, object, stream)
-
-	def object_get_stream(self, bucket, object, stream):
-		request = self.create_request("OBJECT_GET", bucket = bucket, object = object)
+	def object_get_uri(self, uri, stream):
+		if uri.type != "s3":
+			raise ValueError("Expected URI type 's3', got '%s'" % uri.type)
+		request = self.create_request("OBJECT_GET", bucket = uri.bucket(), object = uri.object())
 		response = self.recv_file(request, stream)
 		return response
-		
+
 	def object_delete(self, bucket, object):
 		request = self.create_request("OBJECT_DELETE", bucket = bucket, object = object)
 		response = self.send_request(request)
 		return response
 
 	def object_put_uri(self, filename, uri, extra_headers = None):
+		# TODO TODO
+		# Make it consistent with stream-oriented object_get_uri()
 		if uri.type != "s3":
 			raise ValueError("Expected URI type 's3', got '%s'" % uri.type)
 		return self.object_put(filename, uri.bucket(), uri.object(), extra_headers)
-
-	def object_get_uri(self, uri, filename):
-		if uri.type != "s3":
-			raise ValueError("Expected URI type 's3', got '%s'" % uri.type)
-		if filename == "-":
-			return self.object_get_stream(uri.bucket(), uri.object(), sys.stdout)
-		else:
-			return self.object_get_file(uri.bucket(), uri.object(), filename)
 
 	def object_delete_uri(self, uri):
 		if uri.type != "s3":
@@ -359,7 +321,7 @@ class S3(object):
 			raise S3Error(response)
 		return response
 
-	def send_file(self, request, file):
+	def send_file(self, request, file, throttle = 0, retries = 3):
 		method_string, resource, headers = request
 		info("Sending file '%s', please wait..." % file.name)
 		conn = self.get_connection(resource['bucket'])
@@ -369,23 +331,46 @@ class S3(object):
 			conn.putheader(header, str(headers[header]))
 		conn.endheaders()
 		file.seek(0)
+		timestamp_start = time.time()
+		md5_hash = md5.new()
 		size_left = size_total = headers.get("content-length")
 		while (size_left > 0):
 			debug("SendFile: Reading up to %d bytes from '%s'" % (self.config.send_chunk, file.name))
 			data = file.read(self.config.send_chunk)
+			md5_hash.update(data)
 			debug("SendFile: Sending %d bytes to the server" % len(data))
-			conn.send(data)
+			try:
+				conn.send(data)
+			except Exception, e:
+				## When an exception occurs insert a 
+				if retries:
+					conn.close()
+					warning("Upload of '%s' failed %s " % (file.name, e))
+					throttle = throttle and throttle * 5 or 0.01
+					warning("Retrying on lower speed (throttle=%0.2f)" % throttle)
+					return self.send_file(request, file, throttle, retries - 1)
+				else:
+					debug("Giving up on '%s' %s" % (file.name, e))
+					raise S3UploadError
+
 			size_left -= len(data)
+			if throttle:
+				time.sleep(throttle)
 			info("Sent %d bytes (%d %% of %d)" % (
 				(size_total - size_left),
 				(size_total - size_left) * 100 / size_total,
 				size_total))
+		timestamp_end = time.time()
+		md5_computed = md5_hash.hexdigest()
 		response = {}
 		http_response = conn.getresponse()
 		response["status"] = http_response.status
 		response["reason"] = http_response.reason
 		response["headers"] = convertTupleListToDict(http_response.getheaders())
-		response["data"] =  http_response.read()
+		response["data"] = http_response.read()
+		response["elapsed"] = timestamp_end - timestamp_start
+		response["size"] = size_total
+		response["speed"] = float(response["size"]) / response["elapsed"]
 		conn.close()
 
 		if response["status"] == 307:
@@ -395,6 +380,16 @@ class S3(object):
 			self.set_hostname(redir_bucket, redir_hostname)
 			info("Redirected to: %s" % (redir_hostname))
 			return self.send_file(request, file)
+
+		debug("MD5 sums: computed=%s, received=%s" % (md5_computed, response["headers"]["etag"]))
+		if response["headers"]["etag"].strip('"\'') != md5_hash.hexdigest():
+			warning("MD5 Sums don't match!")
+			if retries:
+				info("Retrying upload.")
+				return self.send_file(request, file, throttle, retries - 1)
+			else:
+				debug("Too many failures. Giving up on '%s'" % (file.name))
+				raise S3UploadError
 
 		if response["status"] < 200 or response["status"] > 299:
 			raise S3Error(response)
@@ -430,6 +425,7 @@ class S3(object):
 		md5_hash = md5.new()
 		size_left = size_total = int(response["headers"]["content-length"])
 		size_recvd = 0
+		timestamp_start = time.time()
 		while (size_recvd < size_total):
 			this_chunk = size_left > self.config.recv_chunk and self.config.recv_chunk or size_left
 			debug("ReceiveFile: Receiving up to %d bytes from the server" % this_chunk)
@@ -443,9 +439,12 @@ class S3(object):
 				size_recvd * 100 / size_total,
 				size_total))
 		conn.close()
+		timestamp_end = time.time()
 		response["md5"] = md5_hash.hexdigest()
 		response["md5match"] = response["headers"]["etag"].find(response["md5"]) >= 0
+		response["elapsed"] = timestamp_end - timestamp_start
 		response["size"] = size_recvd
+		response["speed"] = float(response["size"]) / response["elapsed"]
 		if response["size"] != long(response["headers"]["content-length"]):
 			warning("Reported size (%s) does not match received size (%s)" % (
 				response["headers"]["content-length"], response["size"]))
@@ -470,8 +469,9 @@ class S3(object):
 		return base64.encodestring(hmac.new(self.config.secret_key, h, sha).digest()).strip()
 
 	def check_bucket_name(self, bucket):
-		if re.compile("[^A-Za-z0-9\._-]").search(bucket):
-			raise ParameterError("Bucket name '%s' contains unallowed characters" % bucket)
+		invalid = re.compile("([^a-z0-9\._-])").search(bucket)
+		if invalid:
+			raise ParameterError("Bucket name '%s' contains disallowed character '%s'. The only supported ones are: lowercase us-ascii letters (a-z), digits (0-9), dot (.), hyphen (-) and underscore (_)." % (bucket, invalid.groups()[0]))
 		if len(bucket) < 3:
 			raise ParameterError("Bucket name '%s' is too short (min 3 characters)" % bucket)
 		if len(bucket) > 255:
