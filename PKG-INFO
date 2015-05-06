@@ -1,6 +1,6 @@
 Metadata-Version: 1.0
 Name: s3cmd
-Version: 0.9.8.1
+Version: 0.9.8.2
 Summary: S3cmd is a tool for managing Amazon S3 storage space.
 Home-page: http://s3tools.logix.cz
 Author: Michal Ludvig
