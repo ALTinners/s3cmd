@@ -11,6 +11,7 @@ import sha
 import hmac
 import httplib
 import logging
+import mimetypes
 from logging import debug, info, warning, error
 from stat import ST_SIZE
 
@@ -80,6 +81,9 @@ class S3(object):
 		"BucketAlreadyExists" : "Bucket '%s' already exists",
 		}
 
+	## S3 sometimes sends HTTP-307 response 
+	redir_map = {}
+
 	def __init__(self, config):
 		self.config = config
 
@@ -94,11 +98,17 @@ class S3(object):
 
 	def get_hostname(self, bucket):
 		if bucket:
-			host = self.config.host_bucket % { 'bucket' : bucket }
+			if self.redir_map.has_key(bucket):
+				host = self.redir_map[bucket]
+			else:
+				host = self.config.host_bucket % { 'bucket' : bucket }
 		else:
 			host = self.config.host_base
-		debug('get_hostname(): ' + host)
+		debug('get_hostname(%s): %s' % (bucket, host))
 		return host
+
+	def set_hostname(self, bucket, redir_hostname):
+		self.redir_map[bucket] = redir_hostname
 
 	def format_uri(self, resource):
 		if self.config.proxy_host != "":
@@ -131,7 +141,9 @@ class S3(object):
 		while _list_truncated(response["data"]):
 			marker = list[-1]["Key"]
 			info("Listing continues after '%s'" % marker)
-			request = self.create_request("BUCKET_LIST", bucket = bucket, prefix = prefix, marker = marker)
+			request = self.create_request("BUCKET_LIST", bucket = bucket,
+			                              prefix = prefix, 
+			                              marker = self.urlencode_string(marker))
 			response = self.send_request(request)
 			list += _get_contents(response["data"])
 		response['list'] = list
@@ -147,6 +159,8 @@ class S3(object):
 			body += "</LocationConstraint></CreateBucketConfiguration>"
 			debug("bucket_location: " + body)
 		headers["content-length"] = len(body)
+		if self.config.acl_public:
+			headers["x-amz-acl"] = "public-read"
 		request = self.create_request("BUCKET_CREATE", bucket = bucket, headers = headers)
 		response = self.send_request(request, body)
 		return response
@@ -156,8 +170,8 @@ class S3(object):
 		response = self.send_request(request)
 		return response
 
-	def bucket_info(self, bucket):
-		request = self.create_request("BUCKET_LIST", bucket = bucket, extra = "?location")
+	def bucket_info(self, uri):
+		request = self.create_request("BUCKET_LIST", bucket = uri.bucket(), extra = "?location")
 		response = self.send_request(request)
 		response['bucket-location'] = getTextFromXml(response['data'], "LocationConstraint") or "any"
 		return response
@@ -166,7 +180,7 @@ class S3(object):
 		if not os.path.isfile(filename):
 			raise ParameterError("%s is not a regular file" % filename)
 		try:
-			file = open(filename, "r")
+			file = open(filename, "rb")
 			size = os.stat(filename)[ST_SIZE]
 		except IOError, e:
 			raise ParameterError("%s: %s" % (filename, e.strerror))
@@ -174,6 +188,13 @@ class S3(object):
 		if extra_headers:
 			headers.update(extra_headers)
 		headers["content-length"] = size
+		content_type = None
+		if self.config.guess_mime_type:
+			content_type = mimetypes.guess_type(filename)[0]
+		if not content_type:
+			content_type = self.config.default_mime_type
+		debug("Content-Type set to '%s'" % content_type)
+		headers["content-type"] = content_type
 		if self.config.acl_public:
 			headers["x-amz-acl"] = "public-read"
 		request = self.create_request("OBJECT_PUT", bucket = bucket, object = object, headers = headers)
@@ -183,7 +204,7 @@ class S3(object):
 
 	def object_get_file(self, bucket, object, filename):
 		try:
-			stream = open(filename, "w")
+			stream = open(filename, "wb")
 		except IOError, e:
 			raise ParameterError("%s: %s" % (filename, e.strerror))
 		return self.object_get_stream(bucket, object, stream)
@@ -215,6 +236,30 @@ class S3(object):
 		if uri.type != "s3":
 			raise ValueError("Expected URI type 's3', got '%s'" % uri.type)
 		return self.object_delete(uri.bucket(), uri.object())
+
+	def object_info(self, uri):
+		request = self.create_request("OBJECT_HEAD", bucket = uri.bucket(), object = uri.object())
+		response = self.send_request(request)
+		return response
+
+	def get_acl(self, uri):
+		if uri.has_object():
+			request = self.create_request("OBJECT_GET", bucket = uri.bucket(), object = uri.object(), extra = "?acl")
+		else:
+			request = self.create_request("BUCKET_LIST", bucket = uri.bucket(), extra = "?acl")
+		acl = {}
+		response = self.send_request(request)
+		grants = getListFromXml(response['data'], "Grant")
+		for grant in grants:
+			if grant['Grantee'][0].has_key('DisplayName'):
+				user = grant['Grantee'][0]['DisplayName']
+			if grant['Grantee'][0].has_key('URI'):
+				user = grant['Grantee'][0]['URI']
+				if user == 'http://acs.amazonaws.com/groups/global/AllUsers':
+					user = "*anon*"
+			perm = grant['Permission']
+			acl[user] = perm
+		return acl
 
 	## Low level methods
 	def urlencode_string(self, string):
@@ -272,7 +317,7 @@ class S3(object):
 			del(headers["date"])
 		
 		if not headers.has_key("x-amz-date"):
-			headers["x-amz-date"] = time.strftime("%a, %d %b %Y %H:%M:%S %z", time.gmtime(time.time()))
+			headers["x-amz-date"] = time.strftime("%a, %d %b %Y %H:%M:%S +0000", time.gmtime())
 
 		method_string = S3.http_methods.getkey(S3.operations[operation] & S3.http_methods["MASK"])
 		signature = self.sign_headers(method_string, resource, headers)
@@ -301,6 +346,15 @@ class S3(object):
 		response["data"] =  http_response.read()
 		debug("Response: " + str(response))
 		conn.close()
+
+		if response["status"] == 307:
+			## RedirectPermanent
+			redir_bucket = getTextFromXml(response['data'], ".//Bucket")
+			redir_hostname = getTextFromXml(response['data'], ".//Endpoint")
+			self.set_hostname(redir_bucket, redir_hostname)
+			info("Redirected to: %s" % (redir_hostname))
+			return self.send_request(request, body)
+
 		if response["status"] < 200 or response["status"] > 299:
 			raise S3Error(response)
 		return response
@@ -314,6 +368,7 @@ class S3(object):
 		for header in headers.keys():
 			conn.putheader(header, str(headers[header]))
 		conn.endheaders()
+		file.seek(0)
 		size_left = size_total = headers.get("content-length")
 		while (size_left > 0):
 			debug("SendFile: Reading up to %d bytes from '%s'" % (self.config.send_chunk, file.name))
@@ -332,6 +387,15 @@ class S3(object):
 		response["headers"] = convertTupleListToDict(http_response.getheaders())
 		response["data"] =  http_response.read()
 		conn.close()
+
+		if response["status"] == 307:
+			## RedirectPermanent
+			redir_bucket = getTextFromXml(response['data'], ".//Bucket")
+			redir_hostname = getTextFromXml(response['data'], ".//Endpoint")
+			self.set_hostname(redir_bucket, redir_hostname)
+			info("Redirected to: %s" % (redir_hostname))
+			return self.send_file(request, file)
+
 		if response["status"] < 200 or response["status"] > 299:
 			raise S3Error(response)
 		return response
@@ -350,6 +414,16 @@ class S3(object):
 		response["status"] = http_response.status
 		response["reason"] = http_response.reason
 		response["headers"] = convertTupleListToDict(http_response.getheaders())
+
+		if response["status"] == 307:
+			## RedirectPermanent
+			response['data'] = http_response.read()
+			redir_bucket = getTextFromXml(response['data'], ".//Bucket")
+			redir_hostname = getTextFromXml(response['data'], ".//Endpoint")
+			self.set_hostname(redir_bucket, redir_hostname)
+			info("Redirected to: %s" % (redir_hostname))
+			return self.recv_file(request, stream)
+
 		if response["status"] < 200 or response["status"] > 299:
 			raise S3Error(response)
 

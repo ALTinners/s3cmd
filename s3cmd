@@ -159,22 +159,6 @@ def cmd_bucket_delete(args):
 			raise
 	output("Bucket '%s' removed" % uri.bucket())
 
-def cmd_bucket_info(args):
-	uri = S3Uri(args[0])
-	if not uri.type == "s3" or not uri.has_bucket() or uri.has_object():
-		raise ParameterError("Expecting S3 URI with just the bucket name set instead of '%s'" % args[0])
-	try:
-		s3 = S3(Config())
-		response = s3.bucket_info(uri.bucket())
-	except S3Error, e:
-		if S3.codes.has_key(e.info["Code"]):
-			error(S3.codes[e.info["Code"]] % uri.bucket())
-			return
-		else:
-			raise
-	output("Bucket '%s':" % uri.bucket())
-	output("   Location: %s" % response['bucket-location'])
-
 def cmd_object_put(args):
 	s3 = S3(Config())
 
@@ -212,7 +196,7 @@ def cmd_object_put(args):
 			seq, total))
 		if Config().acl_public:
 			output("Public URL of the object is: %s" %
-				(uri.public_url()))
+				(uri_final.public_url()))
 		if Config().encrypt and real_filename != file:
 			debug("Removing temporary encrypted file: %s" % real_filename)
 			os.remove(real_filename)
@@ -277,15 +261,56 @@ def cmd_object_del(args):
 		response = s3.object_delete_uri(uri)
 		output("Object %s deleted" % uri)
 
+def cmd_info(args):
+	s3 = S3(Config())
+
+	while (len(args)):
+		uri_arg = args.pop(0)
+		uri = S3Uri(uri_arg)
+		if uri.type != "s3" or not uri.has_bucket():
+			raise ParameterError("Expecting S3 URI instead of '%s'" % uri_arg)
+
+		try:
+			if uri.has_object():
+				info = s3.object_info(uri)
+				output("%s (object):" % uri.uri())
+				output("   File size: %s" % info['headers']['content-length'])
+				output("   Last mod:  %s" % info['headers']['last-modified'])
+				output("   MIME type: %s" % info['headers']['content-type'])
+				output("   MD5 sum:   %s" % info['headers']['etag'].strip('"'))
+			else:
+				info = s3.bucket_info(uri)
+				output("%s (bucket):" % uri.uri())
+				output("   Location:  %s" % info['bucket-location'])
+			acl = s3.get_acl(uri)
+			for user in acl.keys():
+				output("   ACL:       %s: %s" % (user, acl[user]))
+		except S3Error, e:
+			if S3.codes.has_key(e.info["Code"]):
+				error(S3.codes[e.info["Code"]] % uri.bucket())
+				return
+			else:
+				raise
+
 def cmd_sync(args):
 	def _build_attr_header(src):
 		attrs = {}
 		st = os.stat_result(os.stat(src))
 		for attr in cfg.preserve_attrs_list:
 			if attr == 'uname':
-				val = pwd.getpwuid(st.st_uid).pw_name
+				try:
+					val = pwd.getpwuid(st.st_uid).pw_name
+				except KeyError:
+					attr = "uid"
+					val = st.st_uid
+					warning("%s: Owner username not known. Storing UID=%d instead." % (src, val))
 			elif attr == 'gname':
-				val = grp.getgrgid(st.st_gid).gr_name
+				try:
+					val = grp.getgrgid(st.st_gid).gr_name
+				except KeyError:
+					attr = "gid"
+					val = st.st_gid
+					warning("%s: Owner groupname not known. Storing GID=%d instead." % (src, val))
 			else:
 				val = getattr(st, 'st_' + attr)
 			attrs[attr] = val
@@ -581,15 +606,16 @@ commands = {}
 commands_list = [
 	{"cmd":"mb", "label":"Make bucket", "param":"s3://BUCKET", "func":cmd_bucket_create, "argc":1},
 	{"cmd":"rb", "label":"Remove bucket", "param":"s3://BUCKET", "func":cmd_bucket_delete, "argc":1},
-	{"cmd":"ib", "label":"Bucket information", "param":"s3://BUCKET", "func":cmd_bucket_info, "argc":1},
 	{"cmd":"ls", "label":"List objects or buckets", "param":"[s3://BUCKET[/PREFIX]]", "func":cmd_ls, "argc":0},
 	{"cmd":"la", "label":"List all object in all buckets", "param":"", "func":cmd_buckets_list_all_all, "argc":0},
 	{"cmd":"put", "label":"Put file into bucket", "param":"FILE [FILE...] s3://BUCKET[/PREFIX]", "func":cmd_object_put, "argc":2},
 	{"cmd":"get", "label":"Get file from bucket", "param":"s3://BUCKET/OBJECT LOCAL_FILE", "func":cmd_object_get, "argc":1},
 	{"cmd":"del", "label":"Delete file from bucket", "param":"s3://BUCKET/OBJECT", "func":cmd_object_del, "argc":1},
 	#{"cmd":"mkdir", "label":"Make a virtual S3 directory", "param":"s3://BUCKET/path/to/dir", "func":cmd_mkdir, "argc":1},
-	{"cmd":"sync", "label":"Synchronize a directory tree to S3 and back", "param":"LOCAL_DIR s3://BUCKET[/PREFIX]", "func":cmd_sync, "argc":2},
+	{"cmd":"sync", "label":"Synchronize a directory tree to S3", "param":"LOCAL_DIR s3://BUCKET[/PREFIX]", "func":cmd_sync, "argc":2},
 	{"cmd":"du", "label":"Disk usage by buckets", "param":"[s3://BUCKET[/PREFIX]]", "func":cmd_du, "argc":0},
+	{"cmd":"info", "label":"Get various information about Buckets or Objects", "param":"s3://BUCKET[/OBJECT]", "func":cmd_info, "argc":1},
+	#{"cmd":"setacl", "label":"Modify Access control list for Bucket or Object", "param":"s3://BUCKET[/OBJECT]", "func":cmd_setacl, "argc":1},
 	]
 
 def format_commands(progname):
@@ -636,13 +662,13 @@ if __name__ == '__main__':
 	optparser.add_option("-c", "--config", dest="config", metavar="FILE", help="Config file name. Defaults to %default")
 	optparser.add_option(      "--dump-config", dest="dump_config", action="store_true", help="Dump current configuration after parsing config files and command line options and exit.")
 
-	optparser.add_option("-n", "--dry-run", dest="dry_run", action="store_true", help="Only show what should be uploaded or downloaded but don't actually do it. May still perform S3 requests to get bucket listings though.")
+	optparser.add_option("-n", "--dry-run", dest="dry_run", action="store_true", help="Only show what should be uploaded or downloaded but don't actually do it. May still perform S3 requests to get bucket listings and other information though.")
 
 	optparser.add_option("-e", "--encrypt", dest="encrypt", action="store_true", help="Encrypt files before uploading to S3.")
 	optparser.add_option(      "--no-encrypt", dest="encrypt", action="store_false", help="Don't encrypt files.")
 	optparser.add_option("-f", "--force", dest="force", action="store_true", help="Force overwrite and other dangerous operations.")
-	optparser.add_option("-P", "--acl-public", dest="acl_public", action="store_true", help="Store objects with ACL allowing read by anyone.")
-	optparser.add_option(      "--acl-private", dest="acl_public", action="store_false", help="Store objects with default ACL allowing access by you only.")
+	optparser.add_option("-P", "--acl-public", dest="acl_public", action="store_true", help="Store objects with ACL allowing read for anyone.")
+	optparser.add_option(      "--acl-private", dest="acl_public", action="store_false", help="Store objects with default ACL allowing access for you only.")
 	optparser.add_option(      "--delete-removed", dest="delete_removed", action="store_true", help="Delete remote objects with no corresponding local file [sync]")
 	optparser.add_option(      "--no-delete-removed", dest="delete_removed", action="store_false", help="Don't delete remote objects.")
 	optparser.add_option("-p", "--preserve", dest="preserve_attrs", action="store_true", help="Preserve filesystem attributes (mode, ownership, timestamps). Default for [sync] command.")
