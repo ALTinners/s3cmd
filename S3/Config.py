@@ -10,9 +10,11 @@ import re
 class Config(object):
 	_instance = None
 	_parsed_files = []
+	_doc = {}
 	access_key = ""
 	secret_key = ""
-	host = "s3.amazonaws.com"
+	host_base = "s3.amazonaws.com"
+	host_bucket = "%(bucket)s.s3.amazonaws.com"
 	verbosity = logging.WARNING
 	send_chunk = 4096
 	recv_chunk = 4096
@@ -22,11 +24,26 @@ class Config(object):
 	proxy_host = ""
 	proxy_port = 3128
 	encrypt = False
+	dry_run = False
+	preserve_attrs = True
+	preserve_attrs_list = [ 
+		'uname',	# Verbose owner Name (e.g. 'root')
+		#'uid',		# Numeric user ID (e.g. 0)
+		'gname',	# Group name (e.g. 'users')
+		#'gid',		# Numeric group ID (e.g. 100)
+		'mtime',	# Modification timestamp
+		'ctime',	# Creation timestamp
+		'mode',		# File mode (e.g. rwxr-xr-x = 755)
+		#'acl',		# Full ACL (not yet supported)
+	]
+	delete_removed = False
+	_doc['delete_removed'] = "[sync] Remove remote S3 objects when local file has been deleted"
 	gpg_passphrase = ""
 	gpg_command = ""
 	gpg_encrypt = "%(gpg_command)s -c --verbose --no-use-agent --batch --yes --passphrase-fd %(passphrase_fd)s -o %(output_file)s %(input_file)s"
 	gpg_decrypt = "%(gpg_command)s -d --verbose --no-use-agent --batch --yes --passphrase-fd %(passphrase_fd)s -o %(output_file)s %(input_file)s"
 	use_https = False
+	bucket_location = "US"
 
 	## Creating a singleton
 	def __new__(self, configfile = None):

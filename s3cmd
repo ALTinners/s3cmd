@@ -10,11 +10,12 @@ import logging
 import time
 import os
 import re
+import errno
+import pwd, grp
 
 from copy import copy
 from optparse import OptionParser, Option, OptionValueError, IndentedHelpFormatter
 from logging import debug, info, warning, error
-import elementtree.ElementTree as ET
 from distutils.spawn import find_executable
 
 ## Our modules
@@ -27,6 +28,11 @@ from S3 import Utils
 
 def output(message):
 	print message
+
+def check_args_type(args, type, verbose_type):
+	for arg in args:
+		if S3Uri(arg).type != type:
+			raise ParameterError("Expecting %s instead of '%s'" % (verbose_type, arg))
 
 def cmd_du(args):
 	s3 = S3(Config())
@@ -127,10 +133,9 @@ def cmd_bucket_create(args):
 	uri = S3Uri(args[0])
 	if not uri.type == "s3" or not uri.has_bucket() or uri.has_object():
 		raise ParameterError("Expecting S3 URI with just the bucket name set instead of '%s'" % args[0])
-
 	try:
 		s3 = S3(Config())
-		response = s3.bucket_create(uri.bucket())
+		response = s3.bucket_create(uri.bucket(), cfg.bucket_location)
 	except S3Error, e:
 		if S3.codes.has_key(e.info["Code"]):
 			error(S3.codes[e.info["Code"]] % uri.bucket())
@@ -154,17 +159,33 @@ def cmd_bucket_delete(args):
 			raise
 	output("Bucket '%s' removed" % uri.bucket())
 
+def cmd_bucket_info(args):
+	uri = S3Uri(args[0])
+	if not uri.type == "s3" or not uri.has_bucket() or uri.has_object():
+		raise ParameterError("Expecting S3 URI with just the bucket name set instead of '%s'" % args[0])
+	try:
+		s3 = S3(Config())
+		response = s3.bucket_info(uri.bucket())
+	except S3Error, e:
+		if S3.codes.has_key(e.info["Code"]):
+			error(S3.codes[e.info["Code"]] % uri.bucket())
+			return
+		else:
+			raise
+	output("Bucket '%s':" % uri.bucket())
+	output("   Location: %s" % response['bucket-location'])
+
 def cmd_object_put(args):
 	s3 = S3(Config())
 
 	uri_arg = args.pop()
-	files = args[:]
+	check_args_type(args, 'file', 'filename')
 
 	uri = S3Uri(uri_arg)
 	if uri.type != "s3":
 		raise ParameterError("Expecting S3 URI instead of '%s'" % uri_arg)
 
-	if len(files) > 1 and uri.object != "" and not Config().force:
+	if len(args) > 1 and uri.object() != "" and not Config().force:
 		error("When uploading multiple files the last argument must")
 		error("be a S3 URI specifying just the bucket name")
 		error("WITHOUT object name!")
@@ -172,9 +193,12 @@ def cmd_object_put(args):
 		error("object name will be prefixed to all stored filenames.")
 		sys.exit(1)
 	
-	for file in files:
+	seq = 0
+	total = len(args)
+	for file in args:
+		seq += 1
 		uri_arg_final = str(uri)
-		if len(files) > 1 or uri.object() == "":
+		if len(args) > 1 or uri.object() == "":
 			uri_arg_final += os.path.basename(file)
 		
 		uri_final = S3Uri(uri_arg_final)
@@ -183,8 +207,9 @@ def cmd_object_put(args):
 		if Config().encrypt:
 			exitcode, real_filename, extra_headers["x-amz-meta-s3tools-gpgenc"] = gpg_encrypt(file)
 		response = s3.object_put_uri(real_filename, uri_final, extra_headers)
-		output("File '%s' stored as %s (%d bytes)" %
-			(file, uri_final, response["size"]))
+		output("File '%s' stored as %s (%d bytes) [%d of %d]" %
+			(file, uri_final, response["size"],
+			seq, total))
 		if Config().acl_public:
 			output("Public URL of the object is: %s" %
 				(uri.public_url()))
@@ -195,34 +220,190 @@ def cmd_object_put(args):
 def cmd_object_get(args):
 	s3 = S3(Config())
 
-	uri_arg = args.pop(0)
-	uri = S3Uri(uri_arg)
-	if uri.type != "s3" or not uri.has_object():
-		raise ParameterError("Expecting S3 URI instead of '%s'" % uri_arg)
+	if not S3Uri(args[0]).type == 's3':
+		raise ParameterError("Expecting S3 URI instead of '%s'" % args[0])
 
-	destination = len(args) > 0 and args.pop(0) or uri.object()
-	if os.path.isdir(destination):
-		destination += ("/" + uri.object())
-	if not Config().force and os.path.exists(destination):
-		raise ParameterError("File %s already exists. Use --force to overwrite it" % destination)
-	response = s3.object_get_uri(uri, destination)
-	if response["headers"].has_key("x-amz-meta-s3tools-gpgenc"):
-		gpg_decrypt(destination, response["headers"]["x-amz-meta-s3tools-gpgenc"])
-		response["size"] = os.stat(destination)[6]
-	if destination != "-":
-		output("Object %s saved as '%s' (%d bytes)" %
-			(uri, destination, response["size"]))
+	destination_dir = None
+	destination_file = None
+	if len(args) > 1:
+		if S3Uri(args[-1]).type == 's3':
+			# all S3, use object names to local dir
+			check_args_type(args, type="s3", verbose_type="S3 URI")	# May raise ParameterError
+		else:
+			if (len(args) > 2):
+				# last must be dir, all preceding S3
+				if not os.path.isdir(args[-1]):
+					raise ParameterError("Last parameter must be a directory")
+				destination_dir = args.pop()
+				check_args_type(args, type="s3", verbose_type="S3 URI")	# May raise ParameterError
+			else:
+				# last must be a dir or a filename
+				if os.path.isdir(args[-1]):
+					destination_dir = args.pop()
+				else:
+					destination_file = args.pop()
+
+	while (len(args)):
+		uri_arg = args.pop(0)
+		uri = S3Uri(uri_arg)
+
+		if destination_file:
+			destination = destination_file
+		elif destination_dir:
+			destination = destination_dir + "/" + uri.object()
+		else:
+			# By default the destination filename is the object name
+			destination = uri.object()
+
+		if not Config().force and os.path.exists(destination):
+			raise ParameterError("File %s already exists. Use --force to overwrite it" % destination)
+		response = s3.object_get_uri(uri, destination)
+		if response["headers"].has_key("x-amz-meta-s3tools-gpgenc"):
+			gpg_decrypt(destination, response["headers"]["x-amz-meta-s3tools-gpgenc"])
+			response["size"] = os.stat(destination)[6]
+		if destination != "-":
+			output("Object %s saved as '%s' (%d bytes)" %
+				(uri, destination, response["size"]))
 
 def cmd_object_del(args):
 	s3 = S3(Config())
 
-	uri_arg = args.pop(0)
-	uri = S3Uri(uri_arg)
-	if uri.type != "s3" or not uri.has_object():
-		raise ParameterError("Expecting S3 URI instead of '%s'" % uri_arg)
+	while (len(args)):
+		uri_arg = args.pop(0)
+		uri = S3Uri(uri_arg)
+		if uri.type != "s3" or not uri.has_object():
+			raise ParameterError("Expecting S3 URI instead of '%s'" % uri_arg)
 
-	response = s3.object_delete_uri(uri)
-	output("Object %s deleted" % uri)
+		response = s3.object_delete_uri(uri)
+		output("Object %s deleted" % uri)
+
+def cmd_sync(args):
+	def _build_attr_header(src):
+		attrs = {}
+		st = os.stat_result(os.stat(src))
+		for attr in cfg.preserve_attrs_list:
+			if attr == 'uname':
+				val = pwd.getpwuid(st.st_uid).pw_name
+			elif attr == 'gname':
+				val = grp.getgrgid(st.st_gid).gr_name
+			else:
+				val = getattr(st, 'st_' + attr)
+			attrs[attr] = val
+		result = ""
+		for k in attrs: result += "%s:%s/" % (k, attrs[k])
+		return { 'x-amz-meta-s3cmd-attrs' : result[:-1] }
+	src = args.pop(0)
+	if S3Uri(src).type != "file":
+		raise ParameterError("Source must be a local path instead of: %s" % src)
+	dst = args.pop(0)
+	if not dst.endswith('/'):
+		dst += "/"
+	dst_uri = S3Uri(dst)
+	if dst_uri.type != "s3":
+		raise ParameterError("Destination must be a S3 URI instead of: %s" % dst)
+	if (len(args)):
+		raise ParameterError("Too many parameters! Expected: %s" % commands['sync']['param'])
+
+	s3 = S3(Config())
+
+	output("Compiling list of local files...")
+	if os.path.isdir(src):
+		loc_base = os.path.join(src, "")
+		filelist = os.walk(src)
+	else:
+		loc_base = "./"
+		filelist = [( '.', [], [src] )]
+	loc_base_len = len(loc_base)
+	loc_list = {}
+	for root, dirs, files in filelist:
+		## TODO: implement explicit exclude
+		for f in files:
+			full_name = os.path.join(root, f)
+			if not os.path.isfile(full_name):
+				continue
+			if os.path.islink(full_name):
+				## Synchronize symlinks... one day
+				## for now skip over
+				continue
+			file = full_name[loc_base_len:]
+			sr = os.stat_result(os.lstat(full_name))
+			loc_list[file] = {
+				'full_name' : full_name,
+				'size' : sr.st_size, 
+				'mtime' : sr.st_mtime,
+				## TODO: Possibly more to save here...
+			}
+	loc_count = len(loc_list)
+	
+	output("Retrieving list of remote files...")
+	response = s3.bucket_list(dst_uri.bucket(), prefix = dst_uri.object())
+
+	rem_base = dst_uri.object()
+	rem_base_len = len(rem_base)
+	rem_list = {}
+	rem_count = len(response['list'])
+	for object in response['list']:
+		key = object['Key'][rem_base_len:].encode('utf-8')
+		rem_list[key] = { 
+			'size' : int(object['Size']),
+			# 'mtime' : dateS3toUnix(object['LastModified']), ## That's upload time, not our lastmod time :-(
+			'md5' : object['ETag'][1:-1],
+			'object_key' : object['Key'].encode('utf-8'),
+		}
+	output("Found %d local files, %d remote files" % (loc_count, rem_count))
+
+	output("Verifying checksums...")
+	for file in loc_list.keys():
+		debug("Checking %s ..." % file)
+		if rem_list.has_key(file):
+			debug("%s exists in remote list" % file)
+			## Check size first
+			if rem_list[file]['size'] == loc_list[file]['size']:
+				debug("%s same size: %s" % (file, rem_list[file]['size']))
+				## ... same size, check MD5
+				loc_md5 = Utils.hash_file_md5(loc_list[file]['full_name'])
+				if loc_md5 == rem_list[file]['md5']:
+					debug("%s md5 matches: %s" % (file, rem_list[file]['md5']))
+					## Checksums are the same.
+					## Remove from local-list, all that is left there will be uploaded
+					debug("%s removed from local list - upload not needed" % file)
+					del(loc_list[file])
+				else:
+					debug("! %s md5 mismatch: local=%s remote=%s" % (file, loc_md5, rem_list[file]['md5']))
+			else:
+				debug("! %s size mismatch: local=%s remote=%s" % (file, loc_list[file]['size'], rem_list[file]['size']))
+                        
+			## Remove from remote-list, all that is left there will be deleted
+			debug("%s removed from remote list" % file)
+			del(rem_list[file])
+
+	output("Summary: %d local files to upload, %d remote files to delete" % (len(loc_list), len(rem_list)))
+	for file in rem_list:
+		uri = S3Uri("s3://" + dst_uri.bucket()+"/"+rem_list[file]['object_key'])
+		if cfg.delete_removed:
+			response = s3.object_delete_uri(uri)
+			output("deleted '%s'" % uri)
+		else:
+			output("not-deleted '%s'" % uri)
+
+	total_size = 0
+	total_count = len(loc_list)
+	seq = 0
+	dst_base = dst_uri.uri()
+	if not dst_base[-1] == "/": dst_base += "/"
+	file_list = loc_list.keys()
+	file_list.sort()
+	for file in file_list:
+		seq += 1
+		src = loc_list[file]['full_name']
+		uri = S3Uri(dst_base + file)
+		if cfg.preserve_attrs:
+			attr_header = _build_attr_header(src)
+			debug(attr_header)
+		response = s3.object_put_uri(src, uri, attr_header)
+		output("stored '%s' as '%s' (%d bytes) [%d of %d]" % (src, uri, response["size"], seq, total_count))
+		total_size += response["size"]
+	output("Done. Uploaded %d bytes." % total_size)
 
 def resolve_list(lst, args):
 	retval = []
@@ -335,28 +516,31 @@ def run_configure(config_file):
 					output("Success. Your access key and secret key worked fine :-)")
 
 					output("\nNow verifying that encryption works...")
-					if not getattr(cfg, "gpg_command"):
-						raise Exception("Path to GPG program not set")
-					if not os.path.isfile(getattr(cfg, "gpg_command")):
-						raise Exception("GPG program not found")
-					filename = Utils.mktmpfile()
-					f = open(filename, "w")
-					f.write(os.sys.copyright)
-					f.close()
-					ret_enc = gpg_encrypt(filename)
-					ret_dec = gpg_decrypt(ret_enc[1], ret_enc[2], False)
-					hash = [
-						Utils.hash_file_md5(filename),
-						Utils.hash_file_md5(ret_enc[1]),
-						Utils.hash_file_md5(ret_dec[1]),
-					]
-					os.unlink(filename)
-					os.unlink(ret_enc[1])
-					os.unlink(ret_dec[1])
-					if hash[0] == hash[2] and hash[0] != hash[1]:
-						output ("Success. Encryption and decryption worked fine :-)") 
+					if not getattr(cfg, "gpg_command") or not getattr(cfg, "gpg_passphrase"):
+						output("Not configured. Never mind.")
 					else:
-						raise Exception("Encryption verification error.")
+						if not getattr(cfg, "gpg_command"):
+							raise Exception("Path to GPG program not set")
+						if not os.path.isfile(getattr(cfg, "gpg_command")):
+							raise Exception("GPG program not found")
+						filename = Utils.mktmpfile()
+						f = open(filename, "w")
+						f.write(os.sys.copyright)
+						f.close()
+						ret_enc = gpg_encrypt(filename)
+						ret_dec = gpg_decrypt(ret_enc[1], ret_enc[2], False)
+						hash = [
+							Utils.hash_file_md5(filename),
+							Utils.hash_file_md5(ret_enc[1]),
+							Utils.hash_file_md5(ret_dec[1]),
+						]
+						os.unlink(filename)
+						os.unlink(ret_enc[1])
+						os.unlink(ret_dec[1])
+						if hash[0] == hash[2] and hash[0] != hash[1]:
+							output ("Success. Encryption and decryption worked fine :-)") 
+						else:
+							raise Exception("Encryption verification error.")
 
 				except Exception, e:
 					error("Test failed: %s" % (e))
@@ -371,7 +555,16 @@ def run_configure(config_file):
 			val = raw_input("Retry configuration? [Y/n] ")
 			if val.lower().startswith("n"):
 				raise EOFError()
+
+		## Overwrite existing config file, make it user-readable only
+		old_mask = os.umask(0077)
+		try:
+			os.remove(config_file)
+		except OSError, e:
+			if e.errno != errno.ENOENT:
+				raise
 		f = open(config_file, "w")
+		os.umask(old_mask)
 		cfg.dump_config(f)
 		f.close()
 		output("Configuration saved to '%s'" % config_file)
@@ -388,11 +581,14 @@ commands = {}
 commands_list = [
 	{"cmd":"mb", "label":"Make bucket", "param":"s3://BUCKET", "func":cmd_bucket_create, "argc":1},
 	{"cmd":"rb", "label":"Remove bucket", "param":"s3://BUCKET", "func":cmd_bucket_delete, "argc":1},
+	{"cmd":"ib", "label":"Bucket information", "param":"s3://BUCKET", "func":cmd_bucket_info, "argc":1},
 	{"cmd":"ls", "label":"List objects or buckets", "param":"[s3://BUCKET[/PREFIX]]", "func":cmd_ls, "argc":0},
 	{"cmd":"la", "label":"List all object in all buckets", "param":"", "func":cmd_buckets_list_all_all, "argc":0},
 	{"cmd":"put", "label":"Put file into bucket", "param":"FILE [FILE...] s3://BUCKET[/PREFIX]", "func":cmd_object_put, "argc":2},
 	{"cmd":"get", "label":"Get file from bucket", "param":"s3://BUCKET/OBJECT LOCAL_FILE", "func":cmd_object_get, "argc":1},
 	{"cmd":"del", "label":"Delete file from bucket", "param":"s3://BUCKET/OBJECT", "func":cmd_object_del, "argc":1},
+	#{"cmd":"mkdir", "label":"Make a virtual S3 directory", "param":"s3://BUCKET/path/to/dir", "func":cmd_mkdir, "argc":1},
+	{"cmd":"sync", "label":"Synchronize a directory tree to S3 and back", "param":"LOCAL_DIR s3://BUCKET[/PREFIX]", "func":cmd_sync, "argc":2},
 	{"cmd":"du", "label":"Disk usage by buckets", "param":"[s3://BUCKET[/PREFIX]]", "func":cmd_du, "argc":0},
 	]
 
@@ -440,14 +636,24 @@ if __name__ == '__main__':
 	optparser.add_option("-c", "--config", dest="config", metavar="FILE", help="Config file name. Defaults to %default")
 	optparser.add_option(      "--dump-config", dest="dump_config", action="store_true", help="Dump current configuration after parsing config files and command line options and exit.")
 
+	optparser.add_option("-n", "--dry-run", dest="dry_run", action="store_true", help="Only show what should be uploaded or downloaded but don't actually do it. May still perform S3 requests to get bucket listings though.")
+
 	optparser.add_option("-e", "--encrypt", dest="encrypt", action="store_true", help="Encrypt files before uploading to S3.")
+	optparser.add_option(      "--no-encrypt", dest="encrypt", action="store_false", help="Don't encrypt files.")
 	optparser.add_option("-f", "--force", dest="force", action="store_true", help="Force overwrite and other dangerous operations.")
 	optparser.add_option("-P", "--acl-public", dest="acl_public", action="store_true", help="Store objects with ACL allowing read by anyone.")
+	optparser.add_option(      "--acl-private", dest="acl_public", action="store_false", help="Store objects with default ACL allowing access by you only.")
+	optparser.add_option(      "--delete-removed", dest="delete_removed", action="store_true", help="Delete remote objects with no corresponding local file [sync]")
+	optparser.add_option(      "--no-delete-removed", dest="delete_removed", action="store_false", help="Don't delete remote objects.")
+	optparser.add_option("-p", "--preserve", dest="preserve_attrs", action="store_true", help="Preserve filesystem attributes (mode, ownership, timestamps). Default for [sync] command.")
+	optparser.add_option(      "--no-preserve", dest="preserve_attrs", action="store_false", help="Don't store FS attributes")
+	optparser.add_option(      "--bucket-location", dest="bucket_location", help="Datacentre to create bucket in. Either EU or US (default)")
 
 	optparser.add_option("-m", "--mime-type", dest="default_mime_type", type="mimetype", metavar="MIME/TYPE", help="Default MIME-type to be set for objects stored.")
 	optparser.add_option("-M", "--guess-mime-type", dest="guess_mime_type", action="store_true", help="Guess MIME-type of files by their extension. Falls back to default MIME-Type as specified by --mime-type option")
 
 	optparser.add_option("-H", "--human-readable-sizes", dest="human_readable_sizes", action="store_true", help="Print sizes in human readable form.")
+
 	optparser.add_option("-v", "--verbose", dest="verbosity", action="store_const", const=logging.INFO, help="Enable verbose output.")
 	optparser.add_option("-d", "--debug", dest="verbosity", action="store_const", const=logging.DEBUG, help="Enable debug output.")
 	optparser.add_option(      "--version", dest="show_version", action="store_true", help="Show s3cmd version (%s) and exit." % (PkgInfo.version))
@@ -534,7 +740,10 @@ if __name__ == '__main__':
 		cmd_func(args)
 	except S3Error, e:
 		error("S3 error: " + str(e))
+		sys.exit(1)
 	except ParameterError, e:
 		error("Parameter problem: " + str(e))
+		sys.exit(1)
 
+	sys.exit(0)
 
