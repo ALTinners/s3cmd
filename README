@@ -180,6 +180,9 @@ Simple s3cmd HowTo
    case sensitive and must be entered accurately or you'll 
    keep getting errors about invalid signatures or similar.
 
+   Remember to add ListAllMyBuckets permissions to the keys
+   or you will get an AccessDenied error while testing access.
+
 3) Run "s3cmd ls" to list all your buckets.
    As you just started using S3 there are no buckets owned by 
    you as of now. So the output will be empty.
@@ -235,7 +238,7 @@ Simple s3cmd HowTo
 
    Use --recursive (or -r) to list all the remote files:
 
-   ~$ s3cmd ls s3://public.s3tools.org
+   ~$ s3cmd ls --recursive s3://public.s3tools.org
    2009-02-10 05:10    123456   s3://public.s3tools.org/somefile.xml
    2009-02-10 05:13        18   s3://public.s3tools.org/somewhere/dir1/file1-1.txt
    2009-02-10 05:13         8   s3://public.s3tools.org/somewhere/dir1/file1-2.txt
