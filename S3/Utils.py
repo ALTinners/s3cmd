@@ -12,8 +12,6 @@ import re
 import string
 import random
 import rfc822
-import hmac
-import base64
 import errno
 import urllib
 from calendar import timegm
@@ -49,8 +47,8 @@ else:
 try:
     import xml.etree.ElementTree as ET
 except ImportError:
+    # xml.etree.ElementTree was only added in python 2.5
     import elementtree.ElementTree as ET
-from xml.parsers.expat import ExpatError
 
 __all__ = []
 def parseNodes(nodes):
@@ -74,7 +72,7 @@ def stripNameSpace(xml):
     """
     removeNameSpace(xml) -- remove top-level AWS namespace
     """
-    r = re.compile('^(<?[^>]+?>\s?)(<\w+) xmlns=[\'"](http://[^\'"]+)[\'"](.*)', re.MULTILINE)
+    r = re.compile('^(<?[^>]+?>\s*)(<\w+) xmlns=[\'"](http://[^\'"]+)[\'"](.*)', re.MULTILINE)
     if r.match(xml):
         xmlns = r.match(xml).groups()[2]
         xml = r.sub("\\1\\2\\4", xml)
@@ -90,11 +88,8 @@ def getTreeFromXml(xml):
         if xmlns:
             tree.attrib['xmlns'] = xmlns
         return tree
-    except ExpatError, e:
-        error(e)
-        raise Exceptions.ParameterError("Bucket contains invalid filenames. Please run: s3cmd fixbucket s3://your-bucket/")
     except Exception, e:
-        error(e)
+        error("Error parsing xml: %s", e)
         error(xml)
         raise
 
@@ -343,44 +338,6 @@ def replace_nonprintables(string):
     return new_string
 __all__.append("replace_nonprintables")
 
-def sign_string(string_to_sign):
-    """Sign a string with the secret key, returning base64 encoded results.
-    By default the configured secret key is used, but may be overridden as
-    an argument.
-
-    Useful for REST authentication. See http://s3.amazonaws.com/doc/s3-developer-guide/RESTAuthentication.html
-    """
-    signature = base64.encodestring(hmac.new(Config.Config().secret_key, string_to_sign, sha1).digest()).strip()
-    return signature
-__all__.append("sign_string")
-
-def sign_url(url_to_sign, expiry):
-    """Sign a URL in s3://bucket/object form with the given expiry
-    time. The object will be accessible via the signed URL until the
-    AWS key and secret are revoked or the expiry time is reached, even
-    if the object is otherwise private.
-
-    See: http://s3.amazonaws.com/doc/s3-developer-guide/RESTAuthentication.html
-    """
-    return sign_url_base(
-        bucket = url_to_sign.bucket(),
-        object = url_to_sign.object(),
-        expiry = expiry
-    )
-__all__.append("sign_url")
-
-def sign_url_base(**parms):
-    """Shared implementation of sign_url methods. Takes a hash of 'bucket', 'object' and 'expiry' as args."""
-    parms['expiry']=time_to_epoch(parms['expiry'])
-    parms['access_key']=Config.Config().access_key
-    parms['host_base']=Config.Config().host_base
-    debug("Expiry interpreted as epoch time %s", parms['expiry'])
-    signtext = 'GET\n\n\n%(expiry)d\n/%(bucket)s/%(object)s' % parms
-    debug("Signing plaintext: %r", signtext)
-    parms['sig'] = urllib.quote_plus(sign_string(signtext))
-    debug("Urlencoded signature: %s", parms['sig'])
-    return "http://%(bucket)s.%(host_base)s/%(object)s?AWSAccessKeyId=%(access_key)s&Expires=%(expiry)d&Signature=%(sig)s" % parms
-
 def time_to_epoch(t):
     """Convert time specified in a variety of forms into UNIX epoch time.
     Accepts datetime.datetime, int, anything that has a strftime() method, and standard time 9-tuples
@@ -400,6 +357,9 @@ def time_to_epoch(t):
     elif isinstance(t, str) or isinstance(t, unicode):
         # See if it's a string representation of an epoch
         try:
+            # Support relative times (eg. "+60")
+            if t.startswith('+'):
+                return time.time() + int(t[1:])
             return int(t)
         except ValueError:
             # Try to parse it as a timestamp string
@@ -446,6 +406,20 @@ def check_bucket_name_dns_conformity(bucket):
     except Exceptions.ParameterError:
         return False
 __all__.append("check_bucket_name_dns_conformity")
+
+def check_bucket_name_dns_support(bucket_host, bucket_name):
+    """
+    Check whether either the host_bucket support buckets and
+    either bucket name is dns compatible
+    """
+    if "%(bucket)s" not in bucket_host:
+        return False
+
+    try:
+        return check_bucket_name(bucket_name, dns_strict = True)
+    except Exceptions.ParameterError:
+        return False
+__all__.append("check_bucket_name_dns_support")
 
 def getBucketFromHostname(hostname):
     """
