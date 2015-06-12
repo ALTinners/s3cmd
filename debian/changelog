@@ -1,3 +1,9 @@
+s3cmd (1.5.2-3) unstable; urgency=medium
+
+  * d/control: fix VCS field.
+
+ -- Gianfranco Costamagna <costamagnagianfranco@yahoo.it>  Fri, 12 Jun 2015 11:00:15 +0200
+
 s3cmd (1.5.2-2) unstable; urgency=medium
 
   * Upload to unstable.

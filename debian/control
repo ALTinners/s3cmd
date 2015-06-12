@@ -11,7 +11,7 @@ Build-Depends: debhelper (>= 9),
                python-setuptools
 Standards-Version: 3.9.6
 Vcs-Git: git://anonscm.debian.org/collab-maint/s3cmd.git
-Vcs-Browser: http://anonscm.debian.org/gitweb/?p=collab-maint/casablanca.git
+Vcs-Browser: http://anonscm.debian.org/gitweb/?p=collab-maint/s3cmd.git
 Homepage: http://s3tools.org/s3cmd
 
 Package: s3cmd
