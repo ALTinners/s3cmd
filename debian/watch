@@ -1,2 +1,3 @@
 version=3
-opts=pgpsigurlmangle=s/$/.asc/ https://github.com/s3tools/s3cmd/releases .*/s3cmd-(\d\S*)\.tar\.gz
+opts=pgpsigurlmangle=s/$/.asc/ https://github.com/s3tools/s3cmd/releases \
+.*[^n]/(?:|v|version-|version|release-|r|REL_|rel-|s3cmd(?:_|-))(\d[^\s/]*)\.(?:tar\.xz|txz|tar\.bz2|tbz2|tar\.gz|tgz)
