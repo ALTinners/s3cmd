@@ -29,5 +29,6 @@ S3/__init__.py
 s3cmd.egg-info/PKG-INFO
 s3cmd.egg-info/SOURCES.txt
 s3cmd.egg-info/dependency_links.txt
+s3cmd.egg-info/pbr.json
 s3cmd.egg-info/requires.txt
 s3cmd.egg-info/top_level.txt
