@@ -1,5 +1,0 @@
-fix-manpage-typos.patch
-return-non-zero-code-from-put-command.patch
-do-not-loop-in-rb.patch
-fix-typo.patch
-remove-tmp.patch
