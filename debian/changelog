@@ -1,3 +1,12 @@
+s3cmd (1.6.0-2) unstable; urgency=medium
+
+  * debian/patches/bac265c482cc9226ce1ad7bc67c07fa1e96b0571.patch:
+    - clean up the temp files after permission denied error. (Closes: #800018)
+    - thanks Conrad J.C. Hughes for the useful bug report!
+    - thanks Florent Viard and Matt Domsch for the help and the fixes!
+
+ -- Gianfranco Costamagna <locutusofborg@debian.org>  Thu, 01 Oct 2015 11:40:16 +0200
+
 s3cmd (1.6.0-1) unstable; urgency=medium
 
   * New upstream release.
