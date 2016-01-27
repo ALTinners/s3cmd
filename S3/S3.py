@@ -31,7 +31,7 @@ from Config import Config
 from Exceptions import *
 from MultiPart import MultiPartUpload
 from S3Uri import S3Uri
-from ConnMan import ConnMan
+from ConnMan import ConnMan, CertificateError
 from Crypto import sign_string_v2, sign_string_v4, checksum_sha256_file, checksum_sha256_buffer
 
 try:
@@ -127,9 +127,8 @@ class S3Request(object):
         self.requester_pays()
 
     def requester_pays(self):
-        if self.method_string == "GET" or self.method_string == "POST":
-            if self.s3.config.requester_pays:
-                self.headers['x-amz-request-payer'] = 'requester'
+        if self.s3.config.requester_pays and self.method_string in ("GET", "POST", "PUT"):
+            self.headers['x-amz-request-payer'] = 'requester'
 
     def update_timestamp(self):
         if self.headers.has_key("date"):
@@ -162,33 +161,38 @@ class S3Request(object):
         return False
 
     def sign(self):
-        h  = self.method_string + "\n"
-        h += self.headers.get("content-md5", "")+"\n"
-        h += self.headers.get("content-type", "")+"\n"
-        h += self.headers.get("date", "")+"\n"
-        for header in sorted(self.headers.keys()):
-            if header.startswith("x-amz-"):
-                h += header+":"+str(self.headers[header])+"\n"
-            if header.startswith("x-emc-"):
-                h += header+":"+str(self.headers[header])+"\n"
-        if self.resource['bucket']:
-            h += "/" + self.resource['bucket']
-        h += self.resource['uri']
-
         if self.use_signature_v2():
+            h  = self.method_string + "\n"
+            h += self.headers.get("content-md5", "")+"\n"
+            h += self.headers.get("content-type", "")+"\n"
+            h += self.headers.get("date", "")+"\n"
+            for header in sorted(self.headers.keys()):
+                if header.startswith("x-amz-"):
+                    h += header+":"+str(self.headers[header])+"\n"
+                if header.startswith("x-emc-"):
+                    h += header+":"+str(self.headers[header])+"\n"
+            if self.resource['bucket']:
+                h += "/" + self.resource['bucket']
+            h += self.resource['uri']
             debug("Using signature v2")
             debug("SignHeaders: " + repr(h))
             signature = sign_string_v2(h)
             self.headers["Authorization"] = "AWS "+self.s3.config.access_key+":"+signature
         else:
             debug("Using signature v4")
-            self.headers = sign_string_v4(self.method_string,
-                                          self.s3.get_hostname(self.resource['bucket']),
-                                          self.resource['uri'],
-                                          self.params,
-                                          S3Request.region_map.get(self.resource['bucket'], Config().bucket_location),
-                                          self.headers,
-                                          self.body)
+            hostname = self.s3.get_hostname(self.resource['bucket'])
+
+            ## Default to bucket part of DNS.
+            resource_uri = self.resource['uri']
+            ## If bucket is not part of DNS assume path style to complete the request.
+            if not check_bucket_name_dns_support(self.s3.config.host_bucket, self.resource['bucket']):
+                if self.resource['bucket']:
+                    resource_uri = "/" + self.resource['bucket'] + self.resource['uri']
+
+            bucket_region = S3Request.region_map.get(self.resource['bucket'], Config().bucket_location)
+            ## Sign the data.
+            self.headers = sign_string_v4(self.method_string, hostname, resource_uri, self.params,
+                                          bucket_region, self.headers, self.body)
 
     def get_triplet(self):
         self.update_timestamp()
@@ -387,7 +391,10 @@ class S3(object):
     def bucket_info(self, uri):
         response = {}
         response['bucket-location'] = self.get_bucket_location(uri)
-        response['requester-pays'] = self.get_bucket_requester_pays(uri)
+        try:
+            response['requester-pays'] = self.get_bucket_requester_pays(uri)
+        except S3Error as e:
+            response['requester-pays'] = 'none'
         return response
 
     def website_info(self, uri, bucket_location = None):
@@ -593,9 +600,12 @@ class S3(object):
         if self.config.enable_multipart:
             if size > self.config.multipart_chunk_size_mb * 1024 * 1024 or filename == "-":
                 multipart = True
+                if size > self.config.multipart_max_chunks * self.config.multipart_chunk_size_mb * 1024 * 1024:
+                    raise ParameterError("Chunk size %d MB results in more than %d chunks. Please increase --multipart-chunk-size-mb" % \
+                          (self.config.multipart_chunk_size_mb, self.config.multipart_max_chunks))
         if multipart:
             # Multipart requests are quite different... drop here
-            return self.send_file_multipart(file, headers, uri, size)
+            return self.send_file_multipart(file, headers, uri, size, extra_label)
 
         ## Not multipart...
         if self.config.put_continue:
@@ -718,6 +728,8 @@ class S3(object):
             raise ValueError("Expected URI type 's3', got '%s'" % src_uri.type)
         if dst_uri.type != "s3":
             raise ValueError("Expected URI type 's3', got '%s'" % dst_uri.type)
+        if self.config.acl_public is None:
+            acl = self.get_acl(src_uri)
         headers = SortedDict(ignore_case = True)
         headers['x-amz-copy-source'] = encode_to_s3("/%s/%s" % (src_uri.bucket(), self.urlencode_string(src_uri.object())))
         headers['x-amz-metadata-directive'] = "COPY"
@@ -747,6 +759,14 @@ class S3(object):
             error("Server error during the COPY operation. Overwrite response status to 500")
             raise S3Error(response)
 
+        if self.config.acl_public is None:
+            try:
+                self.set_acl(dst_uri, acl)
+            except S3Error as exc:
+                # Ignore the exception and don't fail the copy
+                # if the server doesn't support setting ACLs
+                if exc.status != 501:
+                    raise exc
         return response
 
     def object_modify(self, src_uri, dst_uri, extra_headers = None):
@@ -1077,6 +1097,8 @@ class S3(object):
             raise
         except OSError:
             raise
+        except CertificateError:
+            raise
         except (IOError, Exception), e:
             if hasattr(e, 'errno') and e.errno != errno.EPIPE:
                 raise
@@ -1138,6 +1160,7 @@ class S3(object):
         size_left = size_total = long(headers["content-length"])
         filename = unicodise(file.name)
         if self.config.progress_meter:
+            labels[u'action'] = u'upload'
             progress = self.config.progress_class(labels, size_total)
         else:
             info("Sending file '%s', please wait..." % filename)
@@ -1292,10 +1315,10 @@ class S3(object):
 
         return response
 
-    def send_file_multipart(self, file, headers, uri, size):
+    def send_file_multipart(self, file, headers, uri, size, extra_label = ""):
         timestamp_start = time.time()
         upload = MultiPartUpload(self, file, uri, headers)
-        upload.upload_all_parts()
+        upload.upload_all_parts(extra_label)
         response = upload.complete_multipart_upload()
         timestamp_end = time.time()
         response["elapsed"] = timestamp_end - timestamp_start
@@ -1312,6 +1335,7 @@ class S3(object):
         method_string, resource, headers = request.get_triplet()
         filename = unicodise(stream.name)
         if self.config.progress_meter:
+            labels[u'action'] = u'download'
             progress = self.config.progress_class(labels, 0)
         else:
             info("Receiving file '%s', please wait..." % filename)
@@ -1363,12 +1387,12 @@ class S3(object):
             redir_hostname = getTextFromXml(response['data'], ".//Endpoint")
             self.set_hostname(redir_bucket, redir_hostname)
             info("Redirected to: %s" % (redir_hostname))
-            return self.recv_file(request, stream, labels)
+            return self.recv_file(request, stream, labels, start_position)
 
         if response["status"] == 400:
-            return self._http_400_handler(request, response, self.recv_file, request, stream, labels)
+            return self._http_400_handler(request, response, self.recv_file, request, stream, labels, start_position)
         if response["status"] == 403:
-            return self._http_403_handler(request, response, self.recv_file, request, stream, labels)
+            return self._http_403_handler(request, response, self.recv_file, request, stream, labels, start_position)
         if response["status"] == 405: # Method Not Allowed.  Don't retry.
             raise S3Error(response)
 
