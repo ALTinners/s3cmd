@@ -6,9 +6,20 @@
 ## License: GPL Version 2
 ## Copyright: TGRMN Software and contributors
 
-from Utils import getTreeFromXml, unicodise, deunicodise
+from __future__ import absolute_import
+
 from logging import debug, error
-import ExitCodes
+import sys
+import S3.Utils
+from . import ExitCodes
+
+if sys.version_info >= (3,0):
+    PY3 = True
+    # In python 3, unicode -> str, and str -> bytes
+    unicode = str
+else:
+    PY3 = False
+
 
 try:
     from xml.etree.ElementTree import ParseError as XmlParseError
@@ -18,12 +29,15 @@ except ImportError:
 
 class S3Exception(Exception):
     def __init__(self, message = ""):
-        self.message = unicodise(message)
+        self.message = S3.Utils.unicodise(message)
 
     def __str__(self):
-        ## Call unicode(self) instead of self.message because
+        ## Don't return self.message directly because
         ## __unicode__() method could be overridden in subclasses!
-        return deunicodise(unicode(self))
+        if PY3:
+            return self.__unicode__()
+        else:
+            return S3.Utils.deunicodise(self.__unicode__())
 
     def __unicode__(self):
         return self.message
@@ -46,18 +60,18 @@ class S3Error (S3Exception):
             "Resource" : ""
         }
         debug("S3Error: %s (%s)" % (self.status, self.reason))
-        if response.has_key("headers"):
+        if "headers" in response:
             for header in response["headers"]:
                 debug("HttpHeader: %s: %s" % (header, response["headers"][header]))
-        if response.has_key("data") and response["data"]:
+        if "data" in response and response["data"]:
             try:
-                tree = getTreeFromXml(response["data"])
+                tree = S3.Utils.getTreeFromXml(response["data"])
             except XmlParseError:
                 debug("Not an XML response")
             else:
                 try:
                     self.info.update(self.parse_error_xml(tree))
-                except Exception, e:
+                except Exception as e:
                     error("Error parsing xml: %s.  ErrorXML: %s" % (e, response["data"]))
 
         self.code = self.info["Code"]
@@ -66,7 +80,7 @@ class S3Error (S3Exception):
 
     def __unicode__(self):
         retval = u"%d " % (self.status)
-        retval += (u"(%s)" % (self.info.has_key("Code") and self.info["Code"] or self.reason))
+        retval += (u"(%s)" % ("Code" in self.info and self.info["Code"] or self.reason))
         error_msg = self.info.get("Message")
         if error_msg:
             retval += (u": %s" % error_msg)
@@ -75,7 +89,7 @@ class S3Error (S3Exception):
     def get_error_code(self):
         if self.status in [301, 307]:
             return ExitCodes.EX_SERVERMOVED
-        elif self.status in [400, 405, 411, 416, 501, 504]:
+        elif self.status in [400, 405, 411, 416, 417, 501, 504]:
             return ExitCodes.EX_SERVERERROR
         elif self.status == 403:
             return ExitCodes.EX_ACCESSDENIED

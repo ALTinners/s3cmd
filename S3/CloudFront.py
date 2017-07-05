@@ -6,6 +6,8 @@
 ## License: GPL Version 2
 ## Copyright: TGRMN Software and contributors
 
+from __future__ import absolute_import
+
 import sys
 import time
 import random
@@ -17,13 +19,13 @@ try:
 except ImportError:
     import elementtree.ElementTree as ET
 
-from S3 import S3
-from Config import Config
-from Exceptions import *
-from Utils import getTreeFromXml, appendXmlTextNode, getDictFromTree, dateS3toPython, getBucketFromHostname, getHostnameFromBucket, deunicodise
-from Crypto import sign_string_v2
-from S3Uri import S3Uri, S3UriS3
-from ConnMan import ConnMan
+from .S3 import S3
+from .Config import Config
+from .Exceptions import *
+from .Utils import getTreeFromXml, appendXmlTextNode, getDictFromTree, dateS3toPython, getBucketFromHostname, getHostnameFromBucket, deunicodise, urlencode_string, convertHeaderTupleListToDict
+from .Crypto import sign_string_v2
+from .S3Uri import S3Uri, S3UriS3
+from .ConnMan import ConnMan
 
 cloudfront_api_version = "2010-11-01"
 cloudfront_resource = "/%(api_ver)s/distribution" % { 'api_ver' : cloudfront_api_version }
@@ -61,7 +63,7 @@ class DistributionSummary(object):
     def parse(self, tree):
         self.info = getDictFromTree(tree)
         self.info['Enabled'] = (self.info['Enabled'].lower() == "true")
-        if self.info.has_key("CNAME") and type(self.info['CNAME']) != list:
+        if "CNAME" in self.info and type(self.info['CNAME']) != list:
             self.info['CNAME'] = [self.info['CNAME']]
 
     def uri(self):
@@ -153,14 +155,14 @@ class DistributionConfig(object):
     def parse(self, tree):
         self.info = getDictFromTree(tree)
         self.info['Enabled'] = (self.info['Enabled'].lower() == "true")
-        if not self.info.has_key("CNAME"):
+        if "CNAME" not in self.info:
             self.info['CNAME'] = []
         if type(self.info['CNAME']) != list:
             self.info['CNAME'] = [self.info['CNAME']]
         self.info['CNAME'] = [cname.lower() for cname in self.info['CNAME']]
-        if not self.info.has_key("Comment"):
+        if "Comment" not in self.info:
             self.info['Comment'] = ""
-        if not self.info.has_key("DefaultRootObject"):
+        if "DefaultRootObject" not in self.info:
             self.info['DefaultRootObject'] = ""
         ## Figure out logging - complex node not parsed by getDictFromTree()
         logging_nodes = tree.findall(".//Logging")
@@ -289,7 +291,7 @@ class InvalidationBatch(object):
         for path in self.paths:
             if len(path) < 1 or path[0] != "/":
                 path = "/" + path
-            appendXmlTextNode("Path", s3.urlencode_string(path), tree)
+            appendXmlTextNode("Path", urlencode_string(path), tree)
         appendXmlTextNode("CallerReference", self.reference, tree)
         return ET.tostring(tree)
 
@@ -447,7 +449,7 @@ class CloudFront(object):
             paths = new_paths
 
         # uri could be either cf:// or s3:// uri
-        cfuri = self.get_dist_name_for_bucket(uri)
+        cfuris = self.get_dist_name_for_bucket(uri)
         if len(paths) > 999:
             try:
                 tmp_filename = Utils.mktmpfile()
@@ -459,16 +461,22 @@ class CloudFront(object):
             except:
                 pass
             raise ParameterError("Too many paths to invalidate")
-        invalbatch = InvalidationBatch(distribution = cfuri.dist_id(), paths = paths)
-        debug("InvalidateObjects(): request_body: %s" % invalbatch)
-        response = self.send_request("Invalidate", dist_id = cfuri.dist_id(),
-                                     body = str(invalbatch))
-        response['dist_id'] = cfuri.dist_id()
-        if response['status'] == 201:
-            inval_info = Invalidation(response['data']).info
-            response['request_id'] = inval_info['Id']
-        debug("InvalidateObjects(): response: %s" % response)
-        return response
+
+        responses = []
+        for cfuri in cfuris:
+            invalbatch = InvalidationBatch(distribution = cfuri.dist_id(), paths = paths)
+            debug("InvalidateObjects(): request_body: %s" % invalbatch)
+            response = self.send_request("Invalidate", dist_id = cfuri.dist_id(),
+                                         body = str(invalbatch))
+            response['dist_id'] = cfuri.dist_id()
+            if response['status'] == 201:
+                inval_info = Invalidation(response['data']).info
+                response['request_id'] = inval_info['Id']
+            debug("InvalidateObjects(): response: %s" % response)
+
+            responses.append(response)
+
+        return responses
 
     def GetInvalList(self, cfuri):
         if cfuri.type != "cf":
@@ -490,7 +498,9 @@ class CloudFront(object):
     ## Low-level methods for handling CloudFront requests
     ## --------------------------------------------------
 
-    def send_request(self, op_name, dist_id = None, request_id = None, body = None, headers = {}, retries = _max_retries):
+    def send_request(self, op_name, dist_id = None, request_id = None, body = None, headers = None, retries = _max_retries):
+        if headers is None:
+            headers = {}
         operation = self.operations[op_name]
         if body:
             headers['content-type'] = 'text/plain'
@@ -502,7 +512,7 @@ class CloudFront(object):
         response = {}
         response["status"] = http_response.status
         response["reason"] = http_response.reason
-        response["headers"] = dict(http_response.getheaders())
+        response["headers"] = convertHeaderTupleListToDict(http_response.getheaders())
         response["data"] =  http_response.read()
         ConnMan.put(conn)
 
@@ -531,12 +541,12 @@ class CloudFront(object):
         if not headers:
             headers = {}
 
-        if headers.has_key("date"):
-            if not headers.has_key("x-amz-date"):
+        if "date" in headers:
+            if "x-amz-date" not in headers:
                 headers["x-amz-date"] = headers["date"]
             del(headers["date"])
 
-        if not headers.has_key("x-amz-date"):
+        if "x-amz-date" not in headers:
             headers["x-amz-date"] = time.strftime("%a, %d %b %Y %H:%M:%S +0000", time.gmtime())
 
         if len(self.config.access_token)>0:
@@ -578,23 +588,30 @@ class CloudFront(object):
             response = self.GetList()
             CloudFront.dist_list = {}
             for d in response['dist_list'].dist_summs:
-                if d.info.has_key("S3Origin"):
-                    CloudFront.dist_list[getBucketFromHostname(d.info['S3Origin']['DNSName'])[0]] = d.uri()
-                elif d.info.has_key("CustomOrigin"):
+                distListIndex = ""
+
+                if "S3Origin" in d.info:
+                    distListIndex = getBucketFromHostname(d.info['S3Origin']['DNSName'])[0]
+                elif "CustomOrigin" in d.info:
                     # Aral: This used to skip over distributions with CustomOrigin, however, we mustn't
                     #       do this since S3 buckets that are set up as websites use custom origins.
                     #       Thankfully, the custom origin URLs they use start with the URL of the
                     #       S3 bucket. Here, we make use this naming convention to support this use case.
                     distListIndex = getBucketFromHostname(d.info['CustomOrigin']['DNSName'])[0];
                     distListIndex = distListIndex[:len(uri.bucket())]
-                    CloudFront.dist_list[distListIndex] = d.uri()
                 else:
                     # Aral: I'm not sure when this condition will be reached, but keeping it in there.
                     continue
+
+                if CloudFront.dist_list.get(distListIndex, None) is None:
+                    CloudFront.dist_list[distListIndex] = set() 
+
+                CloudFront.dist_list[distListIndex].add(d.uri())
+
             debug("dist_list: %s" % CloudFront.dist_list)
         try:
             return CloudFront.dist_list[uri.bucket()]
-        except Exception, e:
+        except Exception as e:
             debug(e)
             raise ParameterError("Unable to translate S3 URI to CloudFront distribution name: %s" % uri)
 
@@ -624,8 +641,8 @@ class Cmd(object):
         cf = CloudFront(Config())
         cfuris = []
         for arg in args:
-            uri = cf.get_dist_name_for_bucket(S3Uri(arg))
-            cfuris.append(uri)
+            uris = cf.get_dist_name_for_bucket(S3Uri(arg))
+            cfuris.extend(uris)
         return cfuris
 
     @staticmethod
@@ -634,16 +651,16 @@ class Cmd(object):
         if not args:
             response = cf.GetList()
             for d in response['dist_list'].dist_summs:
-                if d.info.has_key("S3Origin"):
+                if "S3Origin" in d.info:
                     origin = S3UriS3.httpurl_to_s3uri(d.info['S3Origin']['DNSName'])
-                elif d.info.has_key("CustomOrigin"):
+                elif "CustomOrigin" in d.info:
                     origin = "http://%s/" % d.info['CustomOrigin']['DNSName']
                 else:
                     origin = "<unknown>"
                 pretty_output("Origin", origin)
                 pretty_output("DistId", d.uri())
                 pretty_output("DomainName", d.info['DomainName'])
-                if d.info.has_key("CNAME"):
+                if "CNAME" in d.info:
                     pretty_output("CNAMEs", ", ".join(d.info['CNAME']))
                 pretty_output("Status", d.info['Status'])
                 pretty_output("Enabled", d.info['Enabled'])
@@ -654,16 +671,16 @@ class Cmd(object):
                 response = cf.GetDistInfo(cfuri)
                 d = response['distribution']
                 dc = d.info['DistributionConfig']
-                if dc.info.has_key("S3Origin"):
+                if "S3Origin" in dc.info:
                     origin = S3UriS3.httpurl_to_s3uri(dc.info['S3Origin']['DNSName'])
-                elif dc.info.has_key("CustomOrigin"):
+                elif "CustomOrigin" in dc.info:
                     origin = "http://%s/" % dc.info['CustomOrigin']['DNSName']
                 else:
                     origin = "<unknown>"
                 pretty_output("Origin", origin)
                 pretty_output("DistId", d.uri())
                 pretty_output("DomainName", d.info['DomainName'])
-                if dc.info.has_key("CNAME"):
+                if "CNAME" in dc.info:
                     pretty_output("CNAMEs", ", ".join(dc.info['CNAME']))
                 pretty_output("Status", d.info['Status'])
                 pretty_output("Comment", dc.info['Comment'])

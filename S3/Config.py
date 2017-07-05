@@ -6,14 +6,20 @@
 ## License: GPL Version 2
 ## Copyright: TGRMN Software and contributors
 
+from __future__ import absolute_import
+
 import logging
 from logging import debug, warning, error
 import re
 import os
 import sys
-import Progress
-from SortedDict import SortedDict
-import httplib
+from . import Progress
+from .SortedDict import SortedDict
+try:
+    # python 3 support
+    import httplib
+except ImportError:
+    import http.client as httplib
 import locale
 try:
     import json
@@ -27,9 +33,11 @@ class Config(object):
     access_key = ""
     secret_key = ""
     access_token = ""
+    _access_token_refresh = True
     host_base = "s3.amazonaws.com"
     host_bucket = "%(bucket)s.s3.amazonaws.com"
     kms_key = ""    #can't set this and Server Side Encryption at the same time
+    # simpledb_host looks useless, legacy? to remove?
     simpledb_host = "sdb.amazonaws.com"
     cloudfront_host = "cloudfront.amazonaws.com"
     verbosity = logging.WARNING
@@ -50,6 +58,7 @@ class Config(object):
     skip_existing = False
     recursive = False
     restore_days = 1
+    restore_priority = "Standard"
     acl_public = None
     acl_grants = []
     acl_revokes = []
@@ -75,6 +84,7 @@ class Config(object):
     delete_after = False
     delete_after_fetch = False
     max_delete = -1
+    limit = -1
     _doc['delete_removed'] = "[sync] Remove remote S3 objects when local file has been deleted"
     delay_updates = False  # OBSOLETE
     gpg_passphrase = ""
@@ -130,14 +140,17 @@ class Config(object):
     content_disposition = None
     content_type = None
     stats = False
+    # Disabled by default because can create a latency with a CONTINUE status reply
+    # expected for every send file requests.
+    use_http_expect = False
 
     ## Creating a singleton
-    def __new__(self, configfile = None, access_key=None, secret_key=None):
+    def __new__(self, configfile = None, access_key=None, secret_key=None, access_token=None):
         if self._instance is None:
             self._instance = object.__new__(self)
         return self._instance
 
-    def __init__(self, configfile = None, access_key=None, secret_key=None):
+    def __init__(self, configfile = None, access_key=None, secret_key=None, access_token=None):
         if configfile:
             try:
                 self.read_config_file(configfile)
@@ -149,13 +162,23 @@ class Config(object):
             if access_key and secret_key:
                 self.access_key = access_key
                 self.secret_key = secret_key
+                
+            if access_token:
+                self.access_token = access_token
+                # Do not refresh the IAM role when an access token is provided.
+                self._access_token_refresh = False
 
             if len(self.access_key)==0:
-                env_access_key = os.environ.get("AWS_ACCESS_KEY", None) or os.environ.get("AWS_ACCESS_KEY_ID", None)
-                env_secret_key = os.environ.get("AWS_SECRET_KEY", None) or os.environ.get("AWS_SECRET_ACCESS_KEY", None)
+                env_access_key = os.getenv('AWS_ACCESS_KEY') or os.getenv('AWS_ACCESS_KEY_ID')
+                env_secret_key = os.getenv('AWS_SECRET_KEY') or os.getenv('AWS_SECRET_ACCESS_KEY')
+                env_access_token = os.getenv('AWS_SESSION_TOKEN') or os.getenv('AWS_SECURITY_TOKEN')
                 if env_access_key:
                     self.access_key = env_access_key
                     self.secret_key = env_secret_key
+                    if env_access_token:
+                        # Do not refresh the IAM role when an access token is provided.
+                        self._access_token_refresh = False
+                        self.access_token = env_access_token
                 else:
                     self.role_config()
 
@@ -193,17 +216,18 @@ class Config(object):
             raise
 
     def role_refresh(self):
-        try:
-            self.role_config()
-        except:
-            warning("Could not refresh role")
+        if self._access_token_refresh:
+            try:
+                self.role_config()
+            except:
+                warning("Could not refresh role")
 
     def env_config(self):
         cred_content = ""
         try:
             cred_file = open(os.environ['AWS_CREDENTIAL_FILE'],'r')
             cred_content = cred_file.read()
-        except IOError, e:
+        except IOError as e:
             debug("Error %d accessing credentials file %s" % (e.errno,os.environ['AWS_CREDENTIAL_FILE']))
         r_data = re.compile("^\s*(?P<orig_key>\w+)\s*=\s*(?P<value>.*)")
         r_quotes = re.compile("^\"(.*)\"\s*$")
@@ -285,7 +309,11 @@ class Config(object):
             except ValueError:
                 try:
                     # otherwise it must be a key known to the logging module
-                    value = logging._levelNames[value]
+                    try:
+                        # python 3 support
+                        value = logging._levelNames[value]
+                    except AttributeError:
+                        value = logging._nameToLevel[value]
                 except KeyError:
                     error("Config: verbosity level '%s' is not valid" % value)
                     return
@@ -320,6 +348,12 @@ class Config(object):
             except ValueError:
                 error("Config: value of option '%s' must be an integer, not '%s'" % (option, value))
                 return
+
+        elif option in ["host_base", "host_bucket", "cloudfront_host"]:
+            if value.startswith("http://"):
+                value = value[7:]
+            elif value.startswith("https://"):
+                value = value[8:]
 
 
         setattr(Config, option, value)
@@ -369,7 +403,7 @@ class ConfigParser(object):
         self.cfg[name] = value
 
     def get(self, name, default = None):
-        if self.cfg.has_key(name):
+        if name in self.cfg:
             return self.cfg[name]
         return default
 
