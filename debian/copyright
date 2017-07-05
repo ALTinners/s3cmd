@@ -1,4 +1,4 @@
-Format: http://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: s3cmd
 Upstream-Contact: s3cmd-bugs <s3cmd-bugs@lists.sourceforge.net>
 Source: https://github.com/s3tools/s3cmd
@@ -10,7 +10,7 @@ License: GPL-2+
 Files: debian/*
 Copyright: 2007-2012 Mikhail Gusarov <dottedmag@debian.org>
            2015 Matt Domsch <matt@domsch.com>
-           2015 Gianfranco Costamagna <locutusofborg@debian.org>
+           2015-2017 Gianfranco Costamagna <locutusofborg@debian.org>
 License: GPL-2+
 
 License: GPL-2+
