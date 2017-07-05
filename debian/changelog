@@ -1,3 +1,15 @@
+s3cmd (2.0.0-1) unstable; urgency=medium
+
+  * New upstream version 2.0.0
+  * VCS in secure mode
+  * Update standard version to 4.0.0
+  * Bump compat level to 10
+  * Switch to Python3
+  * Update copyright file
+  * move old pydist-overrides file to python3 version.
+
+ -- Gianfranco Costamagna <locutusofborg@debian.org>  Wed, 05 Jul 2017 11:18:51 +0200
+
 s3cmd (1.6.1-1) unstable; urgency=medium
 
   * New upstream release.
