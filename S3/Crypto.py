@@ -6,25 +6,54 @@
 ## License: GPL Version 2
 ## Copyright: TGRMN Software and contributors
 
+from __future__ import absolute_import
+
 import sys
 import hmac
 import base64
 
-import Config
+from . import Config
 from logging import debug
-from Utils import encode_to_s3, time_to_epoch, deunicodise
+from .Utils import encode_to_s3, time_to_epoch, deunicodise, decode_from_s3
+from .SortedDict import SortedDict
 
 import datetime
-import urllib
+try:
+    # python 3 support
+    from urllib import quote
+except ImportError:
+    from urllib.parse import quote
 
-# hashlib backported to python 2.4 / 2.5 is not compatible with hmac!
-if sys.version_info[0] == 2 and sys.version_info[1] < 6:
-    import sha as sha1
-    from Crypto.Hash import SHA256 as sha256
-else:
-    from hashlib import sha1, sha256
+from hashlib import sha1, sha256
 
 __all__ = []
+
+def format_param_str(params, always_have_equal=False, limited_keys=None):
+    """
+    Format URL parameters from a params dict and returns
+    ?parm1=val1&parm2=val2 or an empty string if there
+    are no parameters.  Output of this function should
+    be appended directly to self.resource['uri']
+    - Set "always_have_equal" to always have the "=" char for a param even when
+    there is no value for it.
+    - Set "limited_keys" list to restrict the param string to keys that are
+    defined in it.
+    """
+    if not params:
+        return ""
+
+    param_str = ""
+    equal_str = always_have_equal and u'=' or ''
+    for key in sorted(params.keys()):
+        if limited_keys and key not in limited_keys:
+            continue
+        value = params[key]
+        if value in (None, ""):
+            param_str += "&%s%s" % (s3_quote(key, unicode_output=True), equal_str)
+        else:
+            param_str += "&%s=%s" % (key, s3_quote(params[key], unicode_output=True))
+    return param_str and "?" + param_str[1:]
+__all__.append("format_param_str")
 
 ### AWS Version 2 signing
 def sign_string_v2(string_to_sign):
@@ -33,10 +62,60 @@ def sign_string_v2(string_to_sign):
     an argument.
 
     Useful for REST authentication. See http://s3.amazonaws.com/doc/s3-developer-guide/RESTAuthentication.html
+    string_to_sign should be utf-8 "bytes".
     """
-    signature = base64.encodestring(hmac.new(Config.Config().secret_key, string_to_sign, sha1).digest()).strip()
+    secret_key = Config.Config().secret_key
+    signature = base64.encodestring(hmac.new(encode_to_s3(secret_key), string_to_sign, sha1).digest()).strip()
     return signature
 __all__.append("sign_string_v2")
+
+def sign_request_v2(method='GET', canonical_uri='/', params=None, cur_headers={}):
+    """Sign a string with the secret key, returning base64 encoded results.
+    By default the configured secret key is used, but may be overridden as
+    an argument.
+
+    Useful for REST authentication. See http://s3.amazonaws.com/doc/s3-developer-guide/RESTAuthentication.html
+    string_to_sign should be utf-8 "bytes".
+    """
+    # valid sub-resources to be included in sign v2:
+    SUBRESOURCES_TO_INCLUDE = ['acl', 'lifecycle', 'location', 'logging',
+                               'notification', 'partNumber', 'policy',
+                               'requestPayment', 'torrent', 'uploadId',
+                               'uploads', 'versionId', 'versioning',
+                               'versions', 'website',
+                               # Missing of aws s3 doc but needed
+                               'delete', 'cors']
+
+    access_key = Config.Config().access_key
+
+    string_to_sign  = method + "\n"
+    string_to_sign += cur_headers.get("content-md5", "") + "\n"
+    string_to_sign += cur_headers.get("content-type", "") + "\n"
+    string_to_sign += cur_headers.get("date", "") + "\n"
+
+    for header in sorted(cur_headers.keys()):
+        if header.startswith("x-amz-"):
+            string_to_sign += header + ":" + cur_headers[header] + "\n"
+        if header.startswith("x-emc-"):
+            string_to_sign += header + ":"+ cur_headers[header] + "\n"
+
+
+    canonical_uri = s3_quote(canonical_uri, quote_backslashes=False, unicode_output=True)
+    canonical_querystring = format_param_str(params, limited_keys=SUBRESOURCES_TO_INCLUDE)
+    # canonical_querystring would be empty if no param given, otherwise it will
+    # starts with a "?"
+    canonical_uri += canonical_querystring
+
+    string_to_sign += canonical_uri
+
+    debug("SignHeaders: " + repr(string_to_sign))
+    signature = decode_from_s3(sign_string_v2(encode_to_s3(string_to_sign)))
+
+    new_headers = dict(list(cur_headers.items()))
+    new_headers["Authorization"] = "AWS " + access_key + ":" + signature
+
+    return new_headers
+__all__.append("sign_request_v2")
 
 def sign_url_v2(url_to_sign, expiry):
     """Sign a URL in s3://bucket/object form with the given expiry
@@ -60,6 +139,7 @@ def sign_url_base_v2(**parms):
     parms['expiry']=time_to_epoch(parms['expiry'])
     parms['access_key']=Config.Config().access_key
     parms['host_base']=Config.Config().host_base
+    parms['object'] = s3_quote(parms['object'], quote_backslashes=False, unicode_output=True)
     debug("Expiry interpreted as epoch time %s", parms['expiry'])
     signtext = 'GET\n\n\n%(expiry)d\n/%(bucket)s/%(object)s' % parms
     param_separator = '?'
@@ -70,26 +150,31 @@ def sign_url_base_v2(**parms):
         signtext += param_separator + 'response-content-type=' + content_type
         param_separator = '&'
     debug("Signing plaintext: %r", signtext)
-    parms['sig'] = urllib.quote_plus(sign_string_v2(signtext))
+    parms['sig'] = s3_quote(sign_string_v2(encode_to_s3(signtext)), unicode_output=True)
     debug("Urlencoded signature: %s", parms['sig'])
     url = "http://%(bucket)s.%(host_base)s/%(object)s?AWSAccessKeyId=%(access_key)s&Expires=%(expiry)d&Signature=%(sig)s" % parms
     if content_disposition is not None:
-        url += "&response-content-disposition=" + urllib.quote_plus(content_disposition)
+        url += "&response-content-disposition=" + s3_quote(content_disposition, unicode_output=True)
     if content_type is not None:
-        url += "&response-content-type=" + urllib.quote_plus(content_type)
+        url += "&response-content-type=" + s3_quote(content_type, unicode_output=True)
     return url
 
 def sign(key, msg):
     return hmac.new(key, encode_to_s3(msg), sha256).digest()
 
 def getSignatureKey(key, dateStamp, regionName, serviceName):
+    """
+    Input: unicode params
+    Output: bytes
+    """
     kDate = sign(encode_to_s3('AWS4' + key), dateStamp)
     kRegion = sign(kDate, regionName)
     kService = sign(kRegion, serviceName)
     kSigning = sign(kService, 'aws4_request')
     return kSigning
 
-def sign_string_v4(method='GET', host='', canonical_uri='/', params={}, region='us-east-1', cur_headers={}, body=''):
+def sign_request_v4(method='GET', host='', canonical_uri='/', params=None,
+                    region='us-east-1', cur_headers={}, body=b''):
     service = 's3'
 
     cfg = Config.Config()
@@ -100,17 +185,17 @@ def sign_string_v4(method='GET', host='', canonical_uri='/', params={}, region='
     amzdate = t.strftime('%Y%m%dT%H%M%SZ')
     datestamp = t.strftime('%Y%m%d')
 
-    canonical_querystring = '&'.join(['%s=%s' % (urllib.quote_plus(p), quote_param(params[p])) for p in sorted(params.keys())])
+    signing_key = getSignatureKey(secret_key, datestamp, region, service)
 
-    splits = canonical_uri.split('?')
 
-    canonical_uri = quote_param(splits[0], quote_backslashes=False)
-    canonical_querystring += '&'.join([('%s' if '=' in qs else '%s=') % qs for qs in splits[1:]])
+    canonical_uri = s3_quote(canonical_uri, quote_backslashes=False, unicode_output=True)
+    canonical_querystring = format_param_str(params, always_have_equal=True).lstrip('?')
 
-    if type(body) == type(sha256('')):
-        payload_hash = body.hexdigest()
+
+    if type(body) == type(sha256(b'')):
+        payload_hash = decode_from_s3(body.hexdigest())
     else:
-        payload_hash = sha256(body).hexdigest()
+        payload_hash = decode_from_s3(sha256(encode_to_s3(body)).hexdigest())
 
     canonical_headers = {'host' : host,
                          'x-amz-content-sha256': payload_hash,
@@ -139,20 +224,40 @@ def sign_string_v4(method='GET', host='', canonical_uri='/', params={}, region='
 
     algorithm = 'AWS4-HMAC-SHA256'
     credential_scope = datestamp + '/' + region + '/' + service + '/' + 'aws4_request'
-    string_to_sign = algorithm + '\n' +  amzdate + '\n' +  credential_scope + '\n' +  sha256(canonical_request).hexdigest()
-    signing_key = getSignatureKey(secret_key, datestamp, region, service)
-    signature = hmac.new(signing_key, encode_to_s3(string_to_sign), sha256).hexdigest()
-    authorization_header = algorithm + ' ' + 'Credential=' + access_key + '/' + credential_scope + ',' +  'SignedHeaders=' + signed_headers + ',' + 'Signature=' + signature
-    headers = dict(cur_headers.items() + {'x-amz-date':amzdate, 'Authorization':authorization_header, 'x-amz-content-sha256': payload_hash}.items())
-    debug("signature-v4 headers: %s" % headers)
-    return headers
+    string_to_sign = algorithm + '\n' +  amzdate + '\n' +  credential_scope + '\n' + decode_from_s3(sha256(encode_to_s3(canonical_request)).hexdigest())
 
-def quote_param(param, quote_backslashes=True):
-    # As stated by Amazon the '/' in the filename should stay unquoted and %20 should be used for space instead of '+'
-    quoted = urllib.quote_plus(urllib.unquote_plus(param), safe='~').replace('+', '%20')
-    if not quote_backslashes:
-        quoted = quoted.replace('%2F', '/')
-    return quoted
+    signature = decode_from_s3(hmac.new(signing_key, encode_to_s3(string_to_sign), sha256).hexdigest())
+    authorization_header = algorithm + ' ' + 'Credential=' + access_key + '/' + credential_scope + ',' +  'SignedHeaders=' + signed_headers + ',' + 'Signature=' + signature
+    new_headers = SortedDict(cur_headers.items())
+    new_headers.update({'x-amz-date':amzdate,
+                       'Authorization':authorization_header,
+                       'x-amz-content-sha256': payload_hash})
+    debug("signature-v4 headers: %s" % new_headers)
+    return new_headers
+__all__.append("sign_request_v4")
+
+def s3_quote(param, quote_backslashes=True, unicode_output=False):
+    """
+    URI encode every byte. UriEncode() must enforce the following rules:
+    - URI encode every byte except the unreserved characters: 'A'-'Z', 'a'-'z', '0'-'9', '-', '.', '_', and '~'.
+    - The space character is a reserved character and must be encoded as "%20" (and not as "+").
+    - Each URI encoded byte is formed by a '%' and the two-digit hexadecimal value of the byte.
+    - Letters in the hexadecimal value must be uppercase, for example "%1A".
+    - Encode the forward slash character, '/', everywhere except in the object key name.
+    For example, if the object key name is photos/Jan/sample.jpg, the forward slash in the key name is not encoded.
+    """
+    if quote_backslashes:
+        safe_chars = "~"
+    else:
+        safe_chars = "~/"
+    param = encode_to_s3(param)
+    param = quote(param, safe=safe_chars)
+    if unicode_output:
+        param = decode_from_s3(param)
+    else:
+        param = encode_to_s3(param)
+    return param
+__all__.append("s3_quote")
 
 def checksum_sha256_file(filename, offset=0, size=None):
     try:

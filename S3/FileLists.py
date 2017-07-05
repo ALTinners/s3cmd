@@ -6,13 +6,15 @@
 ## License: GPL Version 2
 ## Copyright: TGRMN Software and contributors
 
-from S3 import S3
-from Config import Config
-from S3Uri import S3Uri
-from FileDict import FileDict
-from Utils import *
-from Exceptions import ParameterError
-from HashCache import HashCache
+from __future__ import absolute_import
+
+from .S3 import S3
+from .Config import Config
+from .S3Uri import S3Uri
+from .FileDict import FileDict
+from .Utils import *
+from .Exceptions import ParameterError
+from .HashCache import HashCache
 
 from logging import debug, info, warning
 
@@ -21,6 +23,7 @@ import sys
 import glob
 import re
 import errno
+import io
 
 __all__ = ["fetch_local_list", "fetch_remote_list", "compare_filelists"]
 
@@ -156,23 +159,26 @@ def _get_filelist_from_file(cfg, local_path):
 
     filelist = {}
     for fname in cfg.files_from:
-        if fname == u'-':
-            f = sys.stdin
-        else:
-            try:
-                f = open(deunicodise(fname), 'r')
-            except IOError, e:
-                warning(u"--files-from input file %s could not be opened for reading (%s), skipping." % (fname, e.strerror))
-                continue
+        try:
+            f = None
+            if fname == u'-':
+                f = io.open(sys.stdin.fileno(), mode='r', closefd=False)
+            else:
+                try:
+                    f = io.open(deunicodise(fname), mode='r')
+                except IOError as e:
+                    warning(u"--files-from input file %s could not be opened for reading (%s), skipping." % (fname, e.strerror))
+                    continue
 
-        for line in f:
-            line = unicodise(line).strip()
-            line = os.path.normpath(os.path.join(local_path, line))
-            dirname = unicodise(os.path.dirname(deunicodise(line)))
-            basename = unicodise(os.path.basename(deunicodise(line)))
-            _append(filelist, dirname, basename)
-        if f != sys.stdin:
-            f.close()
+            for line in f:
+                line = unicodise(line).strip()
+                line = os.path.normpath(os.path.join(local_path, line))
+                dirname = unicodise(os.path.dirname(deunicodise(line)))
+                basename = unicodise(os.path.basename(deunicodise(line)))
+                _append(filelist, dirname, basename)
+        finally:
+            if f:
+                f.close()
 
     # reformat to match os.walk()
     result = []
@@ -201,7 +207,7 @@ def fetch_local_list(args, is_src = False, recursive = None):
             full_name = loc_list[relative_file]['full_name']
             try:
                 sr = os.stat_result(os.stat(deunicodise(full_name)))
-            except OSError, e:
+            except OSError as e:
                 if e.errno == errno.ENOENT:
                     # file was removed async to us getting the list
                     continue
@@ -504,8 +510,8 @@ def compare_filelists(src_list, dst_list, src_remote, dst_remote):
     def _compare(src_list, dst_lst, src_remote, dst_remote, file):
         """Return True if src_list[file] matches dst_list[file], else False"""
         attribs_match = True
-        if not (src_list.has_key(file) and dst_list.has_key(file)):
-            info(u"%s: does not exist in one side or the other: src_list=%s, dst_list=%s" % (file, src_list.has_key(file), dst_list.has_key(file)))
+        if not (file in src_list and file in dst_list):
+            info(u"%s: does not exist in one side or the other: src_list=%s, dst_list=%s" % (file, file in src_list, file in dst_list))
             return False
 
         ## check size first
@@ -556,7 +562,7 @@ def compare_filelists(src_list, dst_list, src_remote, dst_remote):
     for relative_file in src_list.keys():
         debug(u"CHECK: %s" % (relative_file))
 
-        if dst_list.has_key(relative_file):
+        if relative_file in dst_list:
             ## Was --skip-existing requested?
             if cfg.skip_existing:
                 debug(u"IGNR: %s (used --skip-existing)" % (relative_file))
@@ -584,7 +590,7 @@ def compare_filelists(src_list, dst_list, src_remote, dst_remote):
                     md5 = src_list.get_md5(relative_file)
                 except IOError:
                     md5 = None
-                if md5 is not None and dst_list.by_md5.has_key(md5):
+                if md5 is not None and md5 in dst_list.by_md5:
                     # Found one, we want to copy
                     dst1 = list(dst_list.by_md5[md5])[0]
                     debug(u"DST COPY src: %s -> %s" % (dst1, relative_file))
@@ -619,7 +625,7 @@ def compare_filelists(src_list, dst_list, src_remote, dst_remote):
                 dst_list.record_md5(relative_file, md5)
 
     for f in dst_list.keys():
-        if src_list.has_key(f) or update_list.has_key(f):
+        if f in src_list or f in update_list:
             # leave only those not on src_list + update_list
             del dst_list[f]
 

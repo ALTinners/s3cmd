@@ -13,6 +13,8 @@ S3/CloudFront.py
 S3/Config.py
 S3/ConnMan.py
 S3/Crypto.py
+S3/Custom_httplib27.py
+S3/Custom_httplib3x.py
 S3/Exceptions.py
 S3/ExitCodes.py
 S3/FileDict.py

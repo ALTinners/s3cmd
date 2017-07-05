@@ -4,11 +4,13 @@
 ## Author: Jerome Leclanche <jerome.leclanche@gmail.com>
 ## License: GPL Version 2
 
+from __future__ import absolute_import
+
 import os
 import sys
 from stat import ST_SIZE
 from logging import debug, info, warning, error
-from Utils import getTextFromXml, getTreeFromXml, formatSize, unicodise, deunicodise, calculateChecksum, parseNodes, encode_to_s3
+from .Utils import getTextFromXml, getTreeFromXml, formatSize, unicodise, deunicodise, calculateChecksum, parseNodes, encode_to_s3
 
 class MultiPartUpload(object):
 
@@ -16,12 +18,12 @@ class MultiPartUpload(object):
     MAX_CHUNK_SIZE_MB = 5120    # 5GB
     MAX_FILE_SIZE = 42949672960 # 5TB
 
-    def __init__(self, s3, file, uri, headers_baseline = {}):
+    def __init__(self, s3, file_stream, uri, headers_baseline=None):
         self.s3 = s3
-        self.file = file
+        self.file_stream = file_stream
         self.uri = uri
         self.parts = {}
-        self.headers_baseline = headers_baseline
+        self.headers_baseline = headers_baseline or {}
         self.upload_id = self.initiate_multipart_upload()
 
     def get_parts_information(self, uri, upload_id):
@@ -68,7 +70,9 @@ class MultiPartUpload(object):
             self.upload_id = None
 
         if self.upload_id is None:
-            request = self.s3.create_request("OBJECT_POST", uri = self.uri, headers = self.headers_baseline, extra = "?uploads")
+            request = self.s3.create_request("OBJECT_POST", uri = self.uri,
+                                             headers = self.headers_baseline,
+                                             uri_params = {'uploads': None})
             response = self.s3.send_request(request)
             data = response["data"]
             self.upload_id = getTextFromXml(data, "UploadId")
@@ -85,11 +89,11 @@ class MultiPartUpload(object):
             raise RuntimeError("Attempting to use a multipart upload that has not been initiated.")
 
         self.chunk_size = self.s3.config.multipart_chunk_size_mb * 1024 * 1024
-        filename = unicodise(self.file.name)
+        filename = self.file_stream.stream_name
 
-        if filename != "<stdin>":
+        if filename != u"<stdin>":
                 size_left = file_size = os.stat(deunicodise(filename))[ST_SIZE]
-                nr_parts = file_size / self.chunk_size + (file_size % self.chunk_size and 1)
+                nr_parts = file_size // self.chunk_size + (file_size % self.chunk_size and 1)
                 debug("MultiPart: Uploading %s in %d parts" % (filename, nr_parts))
         else:
             debug("MultiPart: Uploading from %s" % filename)
@@ -101,7 +105,7 @@ class MultiPartUpload(object):
         if extra_label:
             extra_label = u' ' + extra_label
         seq = 1
-        if filename != "<stdin>":
+        if filename != u"<stdin>":
             while size_left > 0:
                 offset = self.chunk_size * (seq - 1)
                 current_chunk_size = min(file_size - offset, self.chunk_size)
@@ -120,7 +124,7 @@ class MultiPartUpload(object):
                 seq += 1
         else:
             while True:
-                buffer = self.file.read(self.chunk_size)
+                buffer = self.file_stream.read(self.chunk_size)
                 offset = 0 # send from start of the buffer
                 current_chunk_size = len(buffer)
                 labels = {
@@ -150,7 +154,7 @@ class MultiPartUpload(object):
 
         if remote_status is not None:
             if int(remote_status['size']) == chunk_size:
-                checksum = calculateChecksum(buffer, self.file, offset, chunk_size, self.s3.config.send_chunk)
+                checksum = calculateChecksum(buffer, self.file_stream, offset, chunk_size, self.s3.config.send_chunk)
                 remote_checksum = remote_status['checksum'].strip('"\'')
                 if remote_checksum == checksum:
                     warning("MultiPart: size and md5sum match for %s part %d, skipping." % (self.uri, seq))
@@ -164,10 +168,13 @@ class MultiPartUpload(object):
                         % (int(remote_status['size']), chunk_size, self.uri, seq))
 
         headers = { "content-length": str(chunk_size) }
-        query_string = "?partNumber=%i&uploadId=%s" % (seq, encode_to_s3(self.upload_id))
-        request = self.s3.create_request("OBJECT_PUT", uri = self.uri, headers = headers, extra = query_string)
-        response = self.s3.send_file(request, self.file, labels, buffer, offset = offset, chunk_size = chunk_size)
-        self.parts[seq] = response["headers"]["etag"]
+        query_string_params = {'partNumber':'%s' % seq,
+                               'uploadId': self.upload_id}
+        request = self.s3.create_request("OBJECT_PUT", uri = self.uri,
+                                         headers = headers,
+                                         uri_params = query_string_params)
+        response = self.s3.send_file(request, self.file_stream, labels, buffer, offset = offset, chunk_size = chunk_size)
+        self.parts[seq] = response["headers"].get('etag', '').strip('"\'')
         return response
 
     def complete_multipart_upload(self):
@@ -184,7 +191,9 @@ class MultiPartUpload(object):
         body = "<CompleteMultipartUpload>%s</CompleteMultipartUpload>" % ("".join(parts_xml))
 
         headers = { "content-length": str(len(body)) }
-        request = self.s3.create_request("OBJECT_POST", uri = self.uri, headers = headers, extra = "?uploadId=%s" % encode_to_s3(self.upload_id), body = body)
+        request = self.s3.create_request("OBJECT_POST", uri = self.uri,
+                                         headers = headers, body = body,
+                                         uri_params = {'uploadId': self.upload_id})
         response = self.s3.send_request(request)
 
         return response
@@ -195,7 +204,8 @@ class MultiPartUpload(object):
         http://docs.amazonwebservices.com/AmazonS3/latest/API/index.html?mpUploadAbort.html
         """
         debug("MultiPart: Aborting upload: %s" % self.upload_id)
-        #request = self.s3.create_request("OBJECT_DELETE", uri = self.uri, extra = "?uploadId=%s" % (self.upload_id))
+        #request = self.s3.create_request("OBJECT_DELETE", uri = self.uri,
+        #                                  uri_params = {'uploadId': self.upload_id})
         #response = self.s3.send_request(request)
         response = None
         return response

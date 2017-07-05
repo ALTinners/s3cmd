@@ -1,7 +1,13 @@
 # -*- coding: utf-8 -*-
 
-import cPickle as pickle
-from Utils import deunicodise
+from __future__ import absolute_import
+
+try:
+    # python 3 support
+    import cPickle as pickle
+except ImportError:
+    import pickle
+from .Utils import deunicodise
 
 class HashCache(object):
     def __init__(self):
