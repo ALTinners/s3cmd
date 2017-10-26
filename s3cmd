@@ -87,6 +87,7 @@ def subcmd_bucket_usage_all(s3):
     Returns: sum of bucket sizes as integer
     Raises: S3Error
     """
+    cfg = Config()
     response = s3.list_all_buckets()
 
     buckets_size = 0
@@ -94,7 +95,7 @@ def subcmd_bucket_usage_all(s3):
         size = subcmd_bucket_usage(s3, S3Uri("s3://" + bucket["Name"]))
         if size != None:
             buckets_size += size
-    total_size, size_coeff = formatSize(buckets_size, Config().human_readable_sizes)
+    total_size, size_coeff = formatSize(buckets_size, cfg.human_readable_sizes)
     total_size_str = str(total_size) + size_coeff
     output(u"".rjust(8, "-"))
     output(u"%s Total" % (total_size_str.ljust(8)))
@@ -131,7 +132,8 @@ def subcmd_bucket_usage(s3, uri):
     return bucket_size
 
 def cmd_ls(args):
-    s3 = S3(Config())
+    cfg = Config()
+    s3 = S3(cfg)
     if len(args) > 0:
         uri = S3Uri(args[0])
         if uri.type == "s3" and uri.has_bucket():
@@ -151,7 +153,8 @@ def subcmd_all_buckets_list(s3):
                                  bucket["Name"]))
 
 def cmd_all_buckets_list_all_content(args):
-    s3 = S3(Config())
+    cfg = Config()
+    s3 = S3(cfg)
 
     response = s3.list_all_buckets()
 
@@ -161,6 +164,8 @@ def cmd_all_buckets_list_all_content(args):
     return EX_OK
 
 def subcmd_bucket_list(s3, uri, limit):
+    cfg = Config()
+
     bucket = uri.bucket()
     prefix = uri.object()
 
@@ -217,7 +222,8 @@ def subcmd_bucket_list(s3, uri, limit):
         warning(u"The list is truncated because the settings limit was reached.")
 
 def cmd_bucket_create(args):
-    s3 = S3(Config())
+    cfg = Config()
+    s3 = S3(cfg)
     for arg in args:
         uri = S3Uri(arg)
         if not uri.type == "s3" or not uri.has_bucket() or uri.has_object():
@@ -232,7 +238,8 @@ def cmd_bucket_create(args):
     return EX_OK
 
 def cmd_website_info(args):
-    s3 = S3(Config())
+    cfg = Config()
+    s3 = S3(cfg)
     for arg in args:
         uri = S3Uri(arg)
         if not uri.type == "s3" or not uri.has_bucket() or uri.has_object():
@@ -253,7 +260,8 @@ def cmd_website_info(args):
     return EX_OK
 
 def cmd_website_create(args):
-    s3 = S3(Config())
+    cfg = Config()
+    s3 = S3(cfg)
     for arg in args:
         uri = S3Uri(arg)
         if not uri.type == "s3" or not uri.has_bucket() or uri.has_object():
@@ -268,7 +276,8 @@ def cmd_website_create(args):
     return EX_OK
 
 def cmd_website_delete(args):
-    s3 = S3(Config())
+    cfg = Config()
+    s3 = S3(cfg)
     for arg in args:
         uri = S3Uri(arg)
         if not uri.type == "s3" or not uri.has_bucket() or uri.has_object():
@@ -283,7 +292,8 @@ def cmd_website_delete(args):
     return EX_OK
 
 def cmd_expiration_set(args):
-    s3 = S3(Config())
+    cfg = Config()
+    s3 = S3(cfg)
     for arg in args:
         uri = S3Uri(arg)
         if not uri.type == "s3" or not uri.has_bucket() or uri.has_object():
@@ -301,6 +311,9 @@ def cmd_expiration_set(args):
     return EX_OK
 
 def cmd_bucket_delete(args):
+    cfg = Config()
+    s3 = S3(cfg)
+
     def _bucket_delete_one(uri, retry=True):
         try:
             response = s3.bucket_delete(uri.bucket())
@@ -323,7 +336,6 @@ def cmd_bucket_delete(args):
             raise
         return EX_OK
 
-    s3 = S3(Config())
     for arg in args:
         uri = S3Uri(arg)
         if not uri.type == "s3" or not uri.has_bucket() or uri.has_object():
@@ -606,20 +618,21 @@ def cmd_object_get(args):
     return EX_OK
 
 def cmd_object_del(args):
-    recursive = Config().recursive
+    cfg = Config()
+    recursive = cfg.recursive
     for uri_str in args:
         uri = S3Uri(uri_str)
         if uri.type != "s3":
             raise ParameterError("Expecting S3 URI instead of '%s'" % uri_str)
         if not uri.has_object():
-            if recursive and not Config().force:
+            if recursive and not cfg.force:
                 raise ParameterError("Please use --force to delete ALL contents of %s" % uri_str)
             elif not recursive:
                 raise ParameterError("File name required, not only the bucket name. Alternatively use --recursive")
 
         if not recursive:
             rc = subcmd_object_del_uri(uri_str)
-        elif Config().exclude or Config().include or cfg.max_delete > 0:
+        elif cfg.exclude or cfg.include or cfg.max_delete > 0:
             # subcmd_batch_del_iterative does not support file exclusion and can't
             # accurately know how many total files will be deleted, so revert to batch delete.
             rc = subcmd_batch_del(uri_str = uri_str)
@@ -639,6 +652,7 @@ def subcmd_batch_del_iterative(uri_str = None, bucket = None):
         raise ValueError("Pass only one of uri_str or bucket")
     if bucket: # bucket specified
         uri_str = "s3://%s" % bucket
+    cfg = Config()
     s3 = S3(cfg)
     uri = S3Uri(uri_str)
     bucket = uri.bucket()
@@ -675,9 +689,9 @@ def subcmd_batch_del(uri_str = None, bucket = None, remote_list = None):
     Returns: EX_OK
     Raises: ValueError
     """
-
+    cfg = Config()
+    s3 = S3(cfg)
     def _batch_del(remote_list):
-        s3 = S3(cfg)
         to_delete = remote_list[:1000]
         remote_list = remote_list[1000:]
         while len(to_delete):
@@ -718,6 +732,7 @@ def subcmd_object_del_uri(uri_str, recursive = None):
     Returns: True if XXX, False if XXX
     Raises: ValueError
     """
+    cfg = Config()
     s3 = S3(cfg)
 
     if recursive is None:
@@ -748,6 +763,7 @@ def subcmd_object_del_uri(uri_str, recursive = None):
     return True
 
 def cmd_object_restore(args):
+    cfg = Config()
     s3 = S3(cfg)
 
     if cfg.restore_days < 1:
@@ -793,19 +809,20 @@ def cmd_object_restore(args):
 
 
 def subcmd_cp_mv(args, process_fce, action_str, message):
-    if action_str != 'modify' and len(args) < 2:
-        raise ParameterError("Expecting two or more S3 URIs for " + action_str)
-    if action_str == 'modify' and len(args) < 1:
-        raise ParameterError("Expecting one or more S3 URIs for " + action_str)
-    if action_str != 'modify':
-        dst_base_uri = S3Uri(args.pop())
+    cfg = Config()
+    if action_str == 'modify':
+        if len(args) < 1:
+            raise ParameterError("Expecting one or more S3 URIs for " + action_str)
+        destination_base = None
     else:
-        dst_base_uri = S3Uri(args[-1])
+        if len(args) < 2:
+            raise ParameterError("Expecting two or more S3 URIs for " + action_str)
+        dst_base_uri = S3Uri(args.pop())
+        if dst_base_uri.type != "s3":
+            raise ParameterError("Destination must be S3 URI. To download a file use 'get' or 'sync'.")
+        destination_base = dst_base_uri.uri()
 
     scoreboard = ExitScoreboard()
-    if dst_base_uri.type != "s3":
-        raise ParameterError("Destination must be S3 URI. To download a file use 'get' or 'sync'.")
-    destination_base = dst_base_uri.uri()
 
     remote_list, exclude_list, remote_total_size = fetch_remote_list(args, require_attribs = False)
 
@@ -813,21 +830,25 @@ def subcmd_cp_mv(args, process_fce, action_str, message):
 
     info(u"Summary: %d remote files to %s" % (remote_count, action_str))
 
-    if not destination_base.endswith('/'):
+    if destination_base:
         # Trying to mv dir1/ to dir2 will not pass a test in S3.FileLists,
         # so we don't need to test for it here.
-        if len(remote_list) > 1 or cfg.recursive:
-           raise ParameterError("Destination must be a directory and end with '/' when acting on a folder content or on multiple sources.")
+        if not destination_base.endswith('/') \
+           and (len(remote_list) > 1 or cfg.recursive):
+            raise ParameterError("Destination must be a directory and end with '/' when acting on a folder content or on multiple sources.")
 
-    if cfg.recursive:
-        for key in remote_list:
-            remote_list[key]['dest_name'] = destination_base + key
+        if cfg.recursive:
+            for key in remote_list:
+                remote_list[key]['dest_name'] = destination_base + key
+        else:
+            for key in remote_list:
+                if destination_base.endswith("/"):
+                    remote_list[key]['dest_name'] = destination_base + key
+                else:
+                    remote_list[key]['dest_name'] = destination_base
     else:
         for key in remote_list:
-            if destination_base.endswith("/"):
-                remote_list[key]['dest_name'] = destination_base + key
-            else:
-                remote_list[key]['dest_name'] = destination_base
+            remote_list[key]['dest_name'] = remote_list[key]['object_uri_str']
 
     if cfg.dry_run:
         for key in exclude_list:
@@ -876,7 +897,8 @@ def cmd_mv(args):
     return subcmd_cp_mv(args, s3.object_move, "move", u"move: '%(src)s' -> '%(dst)s'")
 
 def cmd_info(args):
-    s3 = S3(Config())
+    cfg = Config()
+    s3 = S3(cfg)
 
     while (len(args)):
         uri_arg = args.pop(0)
@@ -926,23 +948,28 @@ def cmd_info(args):
 
             try:
                 policy = s3.get_policy(uri)
-                output(u"   policy:    %s" % policy)
+                output(u"   Policy:    %s" % policy)
             except S3Error as exc:
                 # Ignore the exception and don't fail the info
                 # if the server doesn't support setting ACLs
-                if exc.status not in [404, 501]:
+                if exc.status == 403:
+                    output(u"   Policy:    Not available: GetPolicy permission is needed to read the policy")
+                elif exc.status == 405:
+                    output(u"   Policy:    Not available: Only the bucket owner can read the policy")
+                elif exc.status not in [404, 501]:
                     raise exc
-                output(u"   policy:    none")
+                else:
+                    output(u"   Policy:    none")
 
             try:
                 cors = s3.get_cors(uri)
-                output(u"   cors:      %s" % cors)
+                output(u"   CORS:      %s" % cors)
             except S3Error as exc:
                 # Ignore the exception and don't fail the info
                 # if the server doesn't support setting ACLs
                 if exc.status not in [404, 501]:
                     raise exc
-                output(u"   cors:    none")
+                output(u"   CORS:      none")
 
             try:
                 acl = s3.get_acl(uri)
@@ -956,6 +983,8 @@ def cmd_info(args):
                 # if the server doesn't support setting ACLs
                 if exc.status not in [404, 501]:
                     raise exc
+                else:
+                    output(u"   ACL:       none")
 
             if uri.has_object():
                 # Temporary hack for performance + python3 compatibility
@@ -983,7 +1012,8 @@ def filedicts_to_keys(*args):
     return keys
 
 def cmd_sync_remote2remote(args):
-    s3 = S3(Config())
+    cfg = Config()
+    s3 = S3(cfg)
 
     # Normalise s3://uri (e.g. assert trailing slash)
     destination_base = S3Uri(args[-1]).uri()
@@ -1128,6 +1158,9 @@ def cmd_sync_remote2remote(args):
     return ret
 
 def cmd_sync_remote2local(args):
+    cfg = Config()
+    s3 = S3(cfg)
+
     def _do_deletes(local_list):
         total_size = 0
         if cfg.max_delete > 0 and len(local_list) > cfg.max_delete:
@@ -1138,8 +1171,6 @@ def cmd_sync_remote2local(args):
             output(u"delete: '%s'" % local_list[key]['full_name'])
             total_size += local_list[key].get(u'size', 0)
         return len(local_list), total_size
-
-    s3 = S3(Config())
 
     destination_base = args[-1]
     source_args = args[:-1]
@@ -1497,6 +1528,7 @@ def local_copy(copy_pairs, destination_base):
     return len(copy_pairs), saved_bytes, failed_copy_list
 
 def remote_copy(s3, copy_pairs, destination_base):
+    cfg = Config()
     saved_bytes = 0
     failed_copy_list = FileDict()
     for (src_obj, dst1, dst2) in copy_pairs:
@@ -1514,6 +1546,7 @@ def remote_copy(s3, copy_pairs, destination_base):
     return (len(copy_pairs), saved_bytes, failed_copy_list)
 
 def _build_attr_header(local_list, src):
+    cfg = Config()
     attrs = {}
     if cfg.preserve_attrs:
         for attr in cfg.preserve_attrs_list:
@@ -1559,6 +1592,9 @@ def _build_attr_header(local_list, src):
 
 
 def cmd_sync_local2remote(args):
+    cfg = Config()
+    s3 = S3(cfg)
+
     def _single_process(source_args):
         for dest in destinations:
             ## Normalize URI to convert s3://bkt to s3://bkt/ (trailing slash)
@@ -1790,7 +1826,6 @@ def cmd_sync_local2remote(args):
                 output(u"Check progress with: s3cmd cfinvalinfo cf://%s/%s" % (result['dist_id'], result['request_id']))
 
     # main execution
-    s3 = S3(cfg)
     uploaded_objects_list = []
 
     if cfg.encrypt:
@@ -1824,6 +1859,7 @@ def cmd_sync_local2remote(args):
     return ret
 
 def cmd_sync(args):
+    cfg = Config()
     if (len(args) < 2):
         raise ParameterError("Too few parameters! Expected: %s" % commands['sync']['param'])
     if cfg.delay_updates:
@@ -1842,6 +1878,7 @@ def cmd_sync(args):
     raise ParameterError("Invalid source/destination: '%s'" % "' '".join(args))
 
 def cmd_setacl(args):
+    cfg = Config()
     s3 = S3(cfg)
 
     set_to_acl = cfg.acl_public and "Public" or "Private"
@@ -1885,6 +1922,7 @@ def cmd_setacl(args):
     return EX_OK
 
 def cmd_setpolicy(args):
+    cfg = Config()
     s3 = S3(cfg)
     uri = S3Uri(args[1])
     policy_file = args[0]
@@ -1901,6 +1939,7 @@ def cmd_setpolicy(args):
     return EX_OK
 
 def cmd_delpolicy(args):
+    cfg = Config()
     s3 = S3(cfg)
     uri = S3Uri(args[0])
     if cfg.dry_run: return EX_OK
@@ -1913,6 +1952,7 @@ def cmd_delpolicy(args):
     return EX_OK
 
 def cmd_setcors(args):
+    cfg = Config()
     s3 = S3(cfg)
     uri = S3Uri(args[1])
     cors_file = args[0]
@@ -1929,6 +1969,7 @@ def cmd_setcors(args):
     return EX_OK
 
 def cmd_delcors(args):
+    cfg = Config()
     s3 = S3(cfg)
     uri = S3Uri(args[0])
     if cfg.dry_run: return EX_OK
@@ -1941,6 +1982,7 @@ def cmd_delcors(args):
     return EX_OK
 
 def cmd_set_payer(args):
+    cfg = Config()
     s3 = S3(cfg)
     uri = S3Uri(args[0])
 
@@ -1955,6 +1997,7 @@ def cmd_set_payer(args):
         return EX_CONFLICT
 
 def cmd_setlifecycle(args):
+    cfg = Config()
     s3 = S3(cfg)
     uri = S3Uri(args[1])
     lifecycle_policy_file = args[0]
@@ -1970,6 +2013,7 @@ def cmd_setlifecycle(args):
     return EX_OK
 
 def cmd_getlifecycle(args):
+    cfg = Config()
     s3 = S3(cfg)
     uri = S3Uri(args[0])
 
@@ -1979,6 +2023,7 @@ def cmd_getlifecycle(args):
     return EX_OK
 
 def cmd_dellifecycle(args):
+    cfg = Config()
     s3 = S3(cfg)
     uri = S3Uri(args[0])
     if cfg.dry_run: return EX_OK
@@ -1990,6 +2035,7 @@ def cmd_dellifecycle(args):
     return EX_OK
 
 def cmd_multipart(args):
+    cfg = Config()
     s3 = S3(cfg)
     uri = S3Uri(args[0])
 
@@ -2011,6 +2057,7 @@ def cmd_multipart(args):
 
 def cmd_abort_multipart(args):
     '''{"cmd":"abortmp",   "label":"abort a multipart upload", "param":"s3://BUCKET Id", "func":cmd_abort_multipart, "argc":2},'''
+    cfg = Config()
     s3 = S3(cfg)
     uri = S3Uri(args[0])
     id = args[1]
@@ -2021,6 +2068,7 @@ def cmd_abort_multipart(args):
 
 def cmd_list_multipart(args):
     '''{"cmd":"abortmp",   "label":"list a multipart upload", "param":"s3://BUCKET Id", "func":cmd_list_multipart, "argc":2},'''
+    cfg = Config()
     s3 = S3(cfg)
     uri = S3Uri(args[0])
     id = args[1]
@@ -2037,6 +2085,7 @@ def cmd_list_multipart(args):
     return EX_OK
 
 def cmd_accesslog(args):
+    cfg = Config()
     s3 = S3(cfg)
     bucket_uri = S3Uri(args.pop())
     if bucket_uri.object():
@@ -2107,6 +2156,7 @@ def cmd_fixbucket(args):
             text = text.encode('ascii', 'xmlcharrefreplace')
         return re.sub("&#?\w+;", _unescape_fixup, text)
 
+    cfg = Config()
     cfg.urlencoding_mode = "fixbucket"
     s3 = S3(cfg)
 
@@ -2161,14 +2211,15 @@ def gpg_command(command, passphrase = ""):
     command = [deunicodise(cmd_entry) for cmd_entry in command]
     p = subprocess.Popen(command, stdin = subprocess.PIPE, stdout = subprocess.PIPE, stderr = subprocess.STDOUT,
                          close_fds = True)
-    p_stdout, p_stderr = p.communicate(deunicodise(passphrase) + "\n")
+    p_stdout, p_stderr = p.communicate(deunicodise(passphrase + "\n"))
     debug("GPG output:")
-    for line in p_stdout.split("\n"):
+    for line in unicodise(p_stdout).split("\n"):
         debug("GPG: " + line)
     p_exitcode = p.wait()
     return p_exitcode
 
 def gpg_encrypt(filename):
+    cfg = Config()
     tmp_filename = Utils.mktmpfile()
     args = {
         "gpg_command" : cfg.gpg_command,
@@ -2182,6 +2233,7 @@ def gpg_encrypt(filename):
     return (code, tmp_filename, "gpg")
 
 def gpg_decrypt(filename, gpgenc_header = "", in_place = True):
+    cfg = Config()
     tmp_filename = Utils.mktmpfile(filename)
     args = {
         "gpg_command" : cfg.gpg_command,
@@ -2218,13 +2270,23 @@ def run_configure(config_file, args):
         setattr(cfg, "gpg_command", find_executable("gpg"))
 
     if getattr(cfg, "proxy_host") == "" and os.getenv("http_proxy"):
-        re_match=re.match("(http://)?([^:]+):(\d+)", os.getenv("http_proxy"))
+        autodetected_encoding = locale.getpreferredencoding() or "UTF-8"
+        re_match=re.match("(http://)?([^:]+):(\d+)",
+                          unicodise_s(os.getenv("http_proxy"), autodetected_encoding))
         if re_match:
             setattr(cfg, "proxy_host", re_match.groups()[1])
             setattr(cfg, "proxy_port", re_match.groups()[2])
 
     try:
-        while 1:
+        # Support for python3
+        # raw_input only exists in py2 and was renamed to input in py3
+        global input
+        input = raw_input
+    except NameError:
+        pass
+
+    try:
+        while True:
             output(u"\nEnter new values or accept defaults in brackets with Enter.")
             output(u"Refer to user manual for detailed description of all options.")
             for option in options:
@@ -2249,7 +2311,7 @@ def run_configure(config_file, args):
                 if len(option) >= 3:
                     output(u"\n%s" % option[2])
 
-                val = raw_input(prompt + ": ")
+                val = unicodise_s(input(prompt + ": "))
                 if val != "":
                     if type(getattr(cfg, option[0])) is bool:
                         # Turn 'Yes' into True, everything else into False
@@ -2258,7 +2320,7 @@ def run_configure(config_file, args):
             output(u"\nNew settings:")
             for option in options:
                 output(u"  %s: %s" % (option[1], getattr(cfg, option[0])))
-            val = raw_input("\nTest access with supplied credentials? [Y/n] ")
+            val = input("\nTest access with supplied credentials? [Y/n] ")
             if val.lower().startswith("y") or val == "":
                 try:
                     # Default, we try to list 'all' buckets which requires
@@ -2288,9 +2350,8 @@ def run_configure(config_file, args):
                         if not os.path.isfile(deunicodise(getattr(cfg, "gpg_command"))):
                             raise Exception("GPG program not found")
                         filename = Utils.mktmpfile()
-                        f = open(deunicodise(filename), "w")
-                        f.write(os.sys.copyright)
-                        f.close()
+                        with open(deunicodise(filename), "w") as fp:
+                            fp.write(os.sys.copyright)
                         ret_enc = gpg_encrypt(filename)
                         ret_dec = gpg_decrypt(ret_enc[1], ret_enc[2], False)
                         hash = [
@@ -2310,20 +2371,20 @@ def run_configure(config_file, args):
                     error(u"Test failed: %s" % (e))
                     if e.code == "AccessDenied":
                         error(u"Are you sure your keys have s3:ListAllMyBuckets permissions?")
-                    val = raw_input("\nRetry configuration? [Y/n] ")
+                    val = input("\nRetry configuration? [Y/n] ")
                     if val.lower().startswith("y") or val == "":
                         continue
                 except Exception as e:
                     error(u"Test failed: %s" % (e))
-                    val = raw_input("\nRetry configuration? [Y/n] ")
+                    val = input("\nRetry configuration? [Y/n] ")
                     if val.lower().startswith("y") or val == "":
                         continue
 
 
-            val = raw_input("\nSave settings? [y/N] ")
+            val = input("\nSave settings? [y/N] ")
             if val.lower().startswith("y"):
                 break
-            val = raw_input("Retry configuration? [Y/n] ")
+            val = input("Retry configuration? [Y/n] ")
             if val.lower().startswith("n"):
                 raise EOFError()
 
@@ -2334,10 +2395,11 @@ def run_configure(config_file, args):
         except OSError as e:
             if e.errno != errno.ENOENT:
                 raise
-        f = open(config_file, "w")
-        os.umask(old_mask)
-        cfg.dump_config(f)
-        f.close()
+        try:
+            with io.open(deunicodise(config_file), "w", encoding=cfg.encoding) as fp:
+                cfg.dump_config(fp)
+        finally:
+            os.umask(old_mask)
         output(u"Configuration saved to '%s'" % config_file)
 
     except (EOFError, KeyboardInterrupt):
@@ -2458,6 +2520,7 @@ def format_commands(progname, commands_list):
 
 
 def update_acl(s3, uri, seq_label=""):
+    cfg = Config()
     something_changed = False
     acl = s3.get_acl(uri)
     debug(u"acl: %s - %r" % (uri, acl.grantees))
@@ -2532,7 +2595,6 @@ class MyHelpFormatter(IndentedHelpFormatter):
             return ""
 
 def main():
-    global cfg
     cfg = Config()
     commands_list = get_commands_list()
     commands = {}
@@ -2545,16 +2607,19 @@ def main():
     optparser = OptionParser(option_class=OptionAll, formatter=MyHelpFormatter())
     #optparser.disable_interspersed_args()
 
+    autodetected_encoding = locale.getpreferredencoding() or "UTF-8"
+
     config_file = None
     if os.getenv("S3CMD_CONFIG"):
-        config_file = os.getenv("S3CMD_CONFIG")
+        config_file = unicodise_s(os.getenv("S3CMD_CONFIG"), autodetected_encoding)
     elif os.name == "nt" and os.getenv("USERPROFILE"):
-        config_file = os.path.join(os.getenv("USERPROFILE").decode('mbcs'), os.getenv("APPDATA").decode('mbcs') or 'Application Data', "s3cmd.ini")
+        config_file = os.path.join(unicodise_s(os.getenv("USERPROFILE"), autodetected_encoding),
+                                   os.getenv("APPDATA") and unicodise_s(os.getenv("APPDATA"), autodetected_encoding)
+                                   or 'Application Data',
+                                   "s3cmd.ini")
     else:
         from os.path import expanduser
         config_file = os.path.join(expanduser("~"), ".s3cfg")
-
-    autodetected_encoding = locale.getpreferredencoding() or "UTF-8"
 
     optparser.set_defaults(config = config_file)
 
@@ -2582,7 +2647,7 @@ def main():
     optparser.add_option("-P", "--acl-public", dest="acl_public", action="store_true", help="Store objects with ACL allowing read for anyone.")
     optparser.add_option(      "--acl-private", dest="acl_public", action="store_false", help="Store objects with default ACL allowing access for you only.")
     optparser.add_option(      "--acl-grant", dest="acl_grants", type="s3acl", action="append", metavar="PERMISSION:EMAIL or USER_CANONICAL_ID", help="Grant stated permission to a given amazon user. Permission is one of: read, write, read_acp, write_acp, full_control, all")
-    optparser.add_option(      "--acl-revoke", dest="acl_revokes", type="s3acl", action="append", metavar="PERMISSION:USER_CANONICAL_ID", help="Revoke stated permission for a given amazon user. Permission is one of: read, write, read_acp, wr     ite_acp, full_control, all")
+    optparser.add_option(      "--acl-revoke", dest="acl_revokes", type="s3acl", action="append", metavar="PERMISSION:USER_CANONICAL_ID", help="Revoke stated permission for a given amazon user. Permission is one of: read, write, read_acp, write_acp, full_control, all")
 
     optparser.add_option("-D", "--restore-days", dest="restore_days", action="store", help="Number of days to keep restored file available (only for 'restore' command).", metavar="NUM")
     optparser.add_option(      "--restore-priority", dest="restore_priority", action="store", choices=['standard', 'expedited', 'bulk'], help="Priority for restoring files from S3 Glacier (only for 'restore' command). Choices available: bulk, standard, expedited")
@@ -2699,10 +2764,6 @@ def main():
         sys.exit(EX_OK)
     debug(u"s3cmd version %s" % PkgInfo.version)
 
-    # TODO: PY3 warning, to remove when it will be stable
-    if sys.version_info >= (3,0):
-        warning("!!!!!!! Support for python3 is currently in a 'Work In Progress' state.\nPlease don't use s3cmd with python3 on production tasks or with sensitive data as unexpected behaviors could occur !!!!!!!")
-
     if options.quiet:
         try:
             f = open("/dev/null", "w")
@@ -2717,6 +2778,8 @@ def main():
 
     try:
         cfg = Config(options.config, options.access_key, options.secret_key, options.access_token)
+    except ValueError as exc:
+        raise ParameterError(unicode(exc))
     except IOError as e:
         if options.run_configure:
             cfg = Config()
@@ -2743,16 +2806,16 @@ def main():
     if options.add_header:
         for hdr in options.add_header:
             try:
-                key, val = hdr.split(":", 1)
+                key, val = unicodise_s(hdr).split(":", 1)
             except ValueError:
-                raise ParameterError("Invalid header format: %s" % hdr)
+                raise ParameterError("Invalid header format: %s" % unicodise_s(hdr))
             key_inval = re.sub("[a-zA-Z0-9-.]", "", key)
             if key_inval:
                 key_inval = key_inval.replace(" ", "<space>")
                 key_inval = key_inval.replace("\t", "<tab>")
                 raise ParameterError("Invalid character(s) in header name '%s': \"%s\"" % (key, key_inval))
-            debug(u"Updating Config.Config extra_headers[%s] -> %s" % (key.strip().lower(), val.strip()))
-            cfg.extra_headers[key.strip().lower()] = val.strip()
+            debug(u"Updating Config.Config extra_headers[%s] -> %s" % (key.replace('_', '-').strip().lower(), val.strip()))
+            cfg.extra_headers[key.replace('_', '-').strip().lower()] = val.strip()
 
     # Process --remove-header
     if options.remove_headers:
@@ -2783,9 +2846,12 @@ def main():
     ## Update Config with other parameters
     for option in cfg.option_list():
         try:
-            if getattr(options, option) != None:
-                debug(u"Updating Config.Config %s -> %s" % (option, getattr(options, option)))
-                cfg.update_option(option, getattr(options, option))
+            value = getattr(options, option)
+            if value != None:
+                if type(value) == type(b''):
+                    value = unicodise_s(value)
+                debug(u"Updating Config.Config %s -> %s" % (option, value))
+                cfg.update_option(option, value)
         except AttributeError:
             ## Some Config() options are not settable from command line
             pass
@@ -2818,9 +2884,13 @@ def main():
     ## Update CloudFront options if some were set
     for option in CfCmd.options.option_list():
         try:
-            if getattr(options, option) != None:
-                debug(u"Updating CloudFront.Cmd %s -> %s" % (option, getattr(options, option)))
-                CfCmd.options.update_option(option, getattr(options, option))
+            value = getattr(options, option)
+            if value != None:
+                if type(value) == type(b''):
+                    value = unicodise_s(value)
+            if value != None:
+                debug(u"Updating CloudFront.Cmd %s -> %s" % (option, value))
+                CfCmd.options.update_option(option, value)
         except AttributeError:
             ## Some CloudFront.Cmd.Options() options are not settable from command line
             pass
@@ -2839,6 +2909,10 @@ def main():
         # of stdout/stderr
         sys.stdout = codecs.getwriter(cfg.encoding)(sys.stdout.buffer, "replace")
         sys.stderr = codecs.getwriter(cfg.encoding)(sys.stderr.buffer, "replace")
+        # getwriter with create an "IObuffer" that have not the encoding attribute
+        # better to add it to not break some functions like "input".
+        sys.stdout.encoding = cfg.encoding
+        sys.stderr.encoding = cfg.encoding
     except AttributeError:
         sys.stdout = codecs.getwriter(cfg.encoding)(sys.stdout, "replace")
         sys.stderr = codecs.getwriter(cfg.encoding)(sys.stderr, "replace")
@@ -2950,7 +3024,10 @@ def report_exception(e, msg=u''):
         except NameError:
             sys.stderr.write(u"S3cmd:   unknown version. Module import problem?\n")
         sys.stderr.write(u"python:   %s\n" % sys.version)
-        sys.stderr.write(u"environment LANG=%s\n" % os.getenv("LANG"))
+        try:
+            sys.stderr.write(u"environment LANG=%s\n" % unicodise_s(os.getenv("LANG"), 'ascii'))
+        except NameError:
+            sys.stderr.write(u"environment LANG=%s\n" % os.getenv("LANG"))
         sys.stderr.write(u"\n")
         if type(tb) == unicode:
             sys.stderr.write(tb)
@@ -3062,7 +3139,7 @@ The solutions to this are:
         sys.exit(EX_OSERR)
 
     except UnicodeEncodeError as e:
-        lang = os.getenv("LANG")
+        lang = unicodise_s(os.getenv("LANG"), 'ascii')
         msg = """
 You have encountered a UnicodeEncodeError.  Your environment
 variable LANG=%s may not specify a Unicode encoding (e.g. UTF-8).

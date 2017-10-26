@@ -26,10 +26,11 @@ from .Config import Config
 from .Exceptions import ParameterError
 from .Utils import getBucketFromHostname
 
-if not 'CertificateError ' in ssl.__dict__:
+if not 'CertificateError' in ssl.__dict__:
     class CertificateError(Exception):
         pass
-    ssl.CertificateError = CertificateError
+else:
+    CertificateError = ssl.CertificateError
 
 __all__ = [ "ConnMan" ]
 
@@ -107,17 +108,19 @@ class http_connection(object):
         """
         debug(u'checking SSL subjectAltName as forgiving wildcard cert')
         san = cert.get('subjectAltName', ())
+        hostname = hostname.lower()
         cleaned_host_bucket_config = urlparse('https://' + Config.host_bucket).hostname
         for key, value in san:
             if key == 'DNS':
+                value = value.lower()
                 if value.startswith('*.s3') and \
                    (value.endswith('.amazonaws.com') and hostname.endswith('.amazonaws.com')) or \
                    (value.endswith('.amazonaws.com.cn') and hostname.endswith('.amazonaws.com.cn')):
                     return True
                 elif value == cleaned_host_bucket_config % \
-                               {'bucket': '*', 'location': Config.bucket_location} and \
+                               {'bucket': '*', 'location': Config.bucket_location.lower()} and \
                      hostname.endswith(cleaned_host_bucket_config % \
-                                       {'bucket': '', 'location': Config.bucket_location}):
+                                       {'bucket': '', 'location': Config.bucket_location.lower()}):
                     return True
         return False
 
@@ -129,7 +132,7 @@ class http_connection(object):
             return
         except ValueError: # empty SSL cert means underlying SSL library didn't validate it, we don't either.
             return
-        except ssl.CertificateError as e:
+        except CertificateError as e:
             if not self.forgive_wildcard_cert(cert, self.hostname):
                 raise e
 
@@ -209,8 +212,9 @@ class http_connection(object):
             if ssl:
                 self.c = http_connection._https_connection(cfg.proxy_host, cfg.proxy_port)
                 debug(u'proxied HTTPSConnection(%s, %s)', cfg.proxy_host, cfg.proxy_port)
-                self.c.set_tunnel(self.hostname, self.port)
-                debug(u'tunnel to %s, %s', self.hostname, self.port)
+                port = self.port and self.port or 443
+                self.c.set_tunnel(self.hostname, port)
+                debug(u'tunnel to %s, %s', self.hostname, port)
             else:
                 self.c = httplib.HTTPConnection(cfg.proxy_host, cfg.proxy_port)
                 debug(u'proxied HTTPConnection(%s, %s)', cfg.proxy_host, cfg.proxy_port)

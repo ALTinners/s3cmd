@@ -12,7 +12,9 @@ import logging
 from logging import debug, warning, error
 import re
 import os
+import io
 import sys
+import json
 from . import Progress
 from .SortedDict import SortedDict
 try:
@@ -21,25 +23,41 @@ try:
 except ImportError:
     import http.client as httplib
 import locale
+
 try:
-    import json
-except ImportError:
-    pass
+    unicode
+except NameError:
+    # python 3 support
+    # In python 3, unicode -> str, and str -> bytes
+    unicode = str
+
+def config_unicodise(string, encoding = "utf-8", errors = "replace"):
+    """
+    Convert 'string' to Unicode or raise an exception.
+    Config can't use toolbox from Utils that is itself using Config
+    """
+    if type(string) == unicode:
+        return string
+
+    try:
+        return unicode(string, encoding, errors)
+    except UnicodeDecodeError:
+        raise UnicodeDecodeError("Conversion to unicode failed: %r" % string)
 
 class Config(object):
     _instance = None
     _parsed_files = []
     _doc = {}
-    access_key = ""
-    secret_key = ""
-    access_token = ""
+    access_key = u""
+    secret_key = u""
+    access_token = u""
     _access_token_refresh = True
-    host_base = "s3.amazonaws.com"
-    host_bucket = "%(bucket)s.s3.amazonaws.com"
-    kms_key = ""    #can't set this and Server Side Encryption at the same time
+    host_base = u"s3.amazonaws.com"
+    host_bucket = u"%(bucket)s.s3.amazonaws.com"
+    kms_key = u""    #can't set this and Server Side Encryption at the same time
     # simpledb_host looks useless, legacy? to remove?
-    simpledb_host = "sdb.amazonaws.com"
-    cloudfront_host = "cloudfront.amazonaws.com"
+    simpledb_host = u"sdb.amazonaws.com"
+    cloudfront_host = u"cloudfront.amazonaws.com"
     verbosity = logging.WARNING
     progress_meter = sys.stdout.isatty()
     progress_class = Progress.ProgressCR
@@ -58,48 +76,48 @@ class Config(object):
     skip_existing = False
     recursive = False
     restore_days = 1
-    restore_priority = "Standard"
+    restore_priority = u"Standard"
     acl_public = None
     acl_grants = []
     acl_revokes = []
-    proxy_host = ""
+    proxy_host = u""
     proxy_port = 3128
     encrypt = False
     dry_run = False
-    add_encoding_exts = ""
+    add_encoding_exts = u""
     preserve_attrs = True
     preserve_attrs_list = [
-        'uname',    # Verbose owner Name (e.g. 'root')
-        'uid',      # Numeric user ID (e.g. 0)
-        'gname',    # Group name (e.g. 'users')
-        'gid',      # Numeric group ID (e.g. 100)
-        'atime',    # Last access timestamp
-        'mtime',    # Modification timestamp
-        'ctime',    # Creation timestamp
-        'mode',     # File mode (e.g. rwxr-xr-x = 755)
-        'md5',      # File MD5 (if known)
-        #'acl',     # Full ACL (not yet supported)
+        u'uname',    # Verbose owner Name (e.g. 'root')
+        u'uid',      # Numeric user ID (e.g. 0)
+        u'gname',    # Group name (e.g. 'users')
+        u'gid',      # Numeric group ID (e.g. 100)
+        u'atime',    # Last access timestamp
+        u'mtime',    # Modification timestamp
+        u'ctime',    # Creation timestamp
+        u'mode',     # File mode (e.g. rwxr-xr-x = 755)
+        u'md5',      # File MD5 (if known)
+        #u'acl',     # Full ACL (not yet supported)
     ]
     delete_removed = False
     delete_after = False
     delete_after_fetch = False
     max_delete = -1
     limit = -1
-    _doc['delete_removed'] = "[sync] Remove remote S3 objects when local file has been deleted"
+    _doc['delete_removed'] = u"[sync] Remove remote S3 objects when local file has been deleted"
     delay_updates = False  # OBSOLETE
-    gpg_passphrase = ""
-    gpg_command = ""
-    gpg_encrypt = "%(gpg_command)s -c --verbose --no-use-agent --batch --yes --passphrase-fd %(passphrase_fd)s -o %(output_file)s %(input_file)s"
-    gpg_decrypt = "%(gpg_command)s -d --verbose --no-use-agent --batch --yes --passphrase-fd %(passphrase_fd)s -o %(output_file)s %(input_file)s"
+    gpg_passphrase = u""
+    gpg_command = u""
+    gpg_encrypt = u"%(gpg_command)s -c --verbose --no-use-agent --batch --yes --passphrase-fd %(passphrase_fd)s -o %(output_file)s %(input_file)s"
+    gpg_decrypt = u"%(gpg_command)s -d --verbose --no-use-agent --batch --yes --passphrase-fd %(passphrase_fd)s -o %(output_file)s %(input_file)s"
     use_https = True
-    ca_certs_file = ""
+    ca_certs_file = u""
     check_ssl_certificate = True
     check_ssl_hostname = True
-    bucket_location = "US"
-    default_mime_type = "binary/octet-stream"
+    bucket_location = u"US"
+    default_mime_type = u"binary/octet-stream"
     guess_mime_type = True
     use_mime_magic = True
-    mime_type = ""
+    mime_type = u""
     enable_multipart = True
     multipart_chunk_size_mb = 15    # MB
     multipart_max_chunks = 10000    # Maximum chunks on AWS S3, could be different on other S3-compatible APIs
@@ -112,27 +130,27 @@ class Config(object):
     debug_exclude = {}
     debug_include = {}
     encoding = locale.getpreferredencoding() or "UTF-8"
-    urlencoding_mode = "normal"
-    log_target_prefix = ""
+    urlencoding_mode = u"normal"
+    log_target_prefix = u""
     reduced_redundancy = False
-    storage_class = ""
+    storage_class = u""
     follow_symlinks = False
     socket_timeout = 300
     invalidate_on_cf = False
     # joseprio: new flags for default index invalidation
     invalidate_default_index_on_cf = False
     invalidate_default_index_root_on_cf = True
-    website_index = "index.html"
-    website_error = ""
-    website_endpoint = "http://%(bucket)s.s3-website-%(location)s.amazonaws.com/"
+    website_index = u"index.html"
+    website_error = u""
+    website_endpoint = u"http://%(bucket)s.s3-website-%(location)s.amazonaws.com/"
     additional_destinations = []
     files_from = []
-    cache_file = ""
-    add_headers = ""
+    cache_file = u""
+    add_headers = u""
     remove_headers = []
-    expiry_days = ""
-    expiry_date = ""
-    expiry_prefix = ""
+    expiry_days = u""
+    expiry_date = u""
+    expiry_prefix = u""
     signature_v2 = False
     limitrate = 0
     requester_pays = False
@@ -143,6 +161,7 @@ class Config(object):
     # Disabled by default because can create a latency with a CONTINUE status reply
     # expected for every send file requests.
     use_http_expect = False
+    signurl_use_https = False
 
     ## Creating a singleton
     def __new__(self, configfile = None, access_key=None, secret_key=None, access_token=None):
@@ -162,7 +181,6 @@ class Config(object):
             if access_key and secret_key:
                 self.access_key = access_key
                 self.secret_key = secret_key
-                
             if access_token:
                 self.access_token = access_token
                 # Do not refresh the IAM role when an access token is provided.
@@ -173,12 +191,13 @@ class Config(object):
                 env_secret_key = os.getenv('AWS_SECRET_KEY') or os.getenv('AWS_SECRET_ACCESS_KEY')
                 env_access_token = os.getenv('AWS_SESSION_TOKEN') or os.getenv('AWS_SECURITY_TOKEN')
                 if env_access_key:
-                    self.access_key = env_access_key
-                    self.secret_key = env_secret_key
+                    # py3 getenv returns unicode and py2 returns bytes.
+                    self.access_key = config_unicodise(env_access_key)
+                    self.secret_key = config_unicodise(env_secret_key)
                     if env_access_token:
                         # Do not refresh the IAM role when an access token is provided.
                         self._access_token_refresh = False
-                        self.access_token = env_access_token
+                        self.access_token = config_unicodise(env_access_token)
                 else:
                     self.role_config()
 
@@ -189,12 +208,9 @@ class Config(object):
                 raise Exception('KMS encryption requires signature v4. Please set signature_v2 to False')
 
     def role_config(self):
-        if sys.version_info[0] * 10 + sys.version_info[1] < 26:
-            error("IAM authentication requires Python 2.6 or newer")
-            raise
-        if not 'json' in sys.modules:
-            error("IAM authentication not available -- missing module json")
-            raise
+        """
+        Get credentials from IAM authentication
+        """
         try:
             conn = httplib.HTTPConnection(host='169.254.169.254', timeout = 2)
             conn.request('GET', "/latest/meta-data/iam/security-credentials/")
@@ -262,7 +278,7 @@ class Config(object):
             option_type = type(getattr(Config, option))
             if option.startswith("_") or \
                not (option_type in (
-                    type("string"), # str
+                    type(u"string"), # str
                         type(42),   # int
                     type(True))):   # bool
                 continue
@@ -290,15 +306,15 @@ class Config(object):
         self._parsed_files.append(configfile)
 
     def dump_config(self, stream):
-        ConfigDumper(stream).dump("default", self)
+        ConfigDumper(stream).dump(u"default", self)
 
     def update_option(self, option, value):
         if value is None:
             return
 
         #### Handle environment reference
-        if str(value).startswith("$"):
-            return self.update_option(option, os.getenv(str(value)[1:]))
+        if unicode(value).startswith("$"):
+            return self.update_option(option, os.getenv(value[1:]))
 
         #### Special treatment of some options
         ## verbosity must be known to "logging" module
@@ -315,8 +331,7 @@ class Config(object):
                     except AttributeError:
                         value = logging._nameToLevel[value]
                 except KeyError:
-                    error("Config: verbosity level '%s' is not valid" % value)
-                    return
+                    raise ValueError("Config: verbosity level '%s' is not valid" % value)
 
         elif option == "limitrate":
             #convert kb,mb to bytes
@@ -329,8 +344,7 @@ class Config(object):
             try:
                 value = shift and int(value[:-1]) << shift or int(value)
             except:
-                error("Config: value of option %s must have suffix m, k, or nothing, not '%s'" % (option, value))
-                return
+                raise ValueError("Config: value of option %s must have suffix m, k, or nothing, not '%s'" % (option, value))
 
         ## allow yes/no, true/false, on/off and 1/0 for boolean options
         elif type(getattr(Config, option)) is type(True):   # bool
@@ -339,15 +353,13 @@ class Config(object):
             elif str(value).lower() in ("false", "no", "off", "0"):
                 value = False
             else:
-                error("Config: value of option '%s' must be Yes or No, not '%s'" % (option, value))
-                return
+                raise ValueError("Config: value of option '%s' must be Yes or No, not '%s'" % (option, value))
 
         elif type(getattr(Config, option)) is type(42):     # int
             try:
                 value = int(value)
             except ValueError:
-                error("Config: value of option '%s' must be an integer, not '%s'" % (option, value))
-                return
+                raise ValueError("Config: value of option '%s' must be an integer, not '%s'" % (option, value))
 
         elif option in ["host_base", "host_bucket", "cloudfront_host"]:
             if value.startswith("http://"):
@@ -368,33 +380,33 @@ class ConfigParser(object):
         if type(sections) != type([]):
             sections = [sections]
         in_our_section = True
-        f = open(file, "r")
         r_comment = re.compile("^\s*#.*")
         r_empty = re.compile("^\s*$")
         r_section = re.compile("^\[([^\]]+)\]")
         r_data = re.compile("^\s*(?P<key>\w+)\s*=\s*(?P<value>.*)")
         r_quotes = re.compile("^\"(.*)\"\s*$")
-        for line in f:
-            if r_comment.match(line) or r_empty.match(line):
-                continue
-            is_section = r_section.match(line)
-            if is_section:
-                section = is_section.groups()[0]
-                in_our_section = (section in sections) or (len(sections) == 0)
-                continue
-            is_data = r_data.match(line)
-            if is_data and in_our_section:
-                data = is_data.groupdict()
-                if r_quotes.match(data["value"]):
-                    data["value"] = data["value"][1:-1]
-                self.__setitem__(data["key"], data["value"])
-                if data["key"] in ("access_key", "secret_key", "gpg_passphrase"):
-                    print_value = ("%s...%d_chars...%s") % (data["value"][:2], len(data["value"]) - 3, data["value"][-1:])
-                else:
-                    print_value = data["value"]
-                debug("ConfigParser: %s->%s" % (data["key"], print_value))
-                continue
-            warning("Ignoring invalid line in '%s': %s" % (file, line))
+        with io.open(file, "r", encoding=self.get('encoding', 'UTF-8')) as fp:
+            for line in fp:
+                if r_comment.match(line) or r_empty.match(line):
+                    continue
+                is_section = r_section.match(line)
+                if is_section:
+                    section = is_section.groups()[0]
+                    in_our_section = (section in sections) or (len(sections) == 0)
+                    continue
+                is_data = r_data.match(line)
+                if is_data and in_our_section:
+                    data = is_data.groupdict()
+                    if r_quotes.match(data["value"]):
+                        data["value"] = data["value"][1:-1]
+                    self.__setitem__(data["key"], data["value"])
+                    if data["key"] in ("access_key", "secret_key", "gpg_passphrase"):
+                        print_value = ("%s...%d_chars...%s") % (data["value"][:2], len(data["value"]) - 3, data["value"][-1:])
+                    else:
+                        print_value = data["value"]
+                    debug("ConfigParser: %s->%s" % (data["key"], print_value))
+                    continue
+                warning("Ignoring invalid line in '%s': %s" % (file, line))
 
     def __getitem__(self, name):
         return self.cfg[name]
@@ -412,14 +424,20 @@ class ConfigDumper(object):
         self.stream = stream
 
     def dump(self, section, config):
-        self.stream.write("[%s]\n" % section)
+        self.stream.write(u"[%s]\n" % section)
         for option in config.option_list():
             value = getattr(config, option)
             if option == "verbosity":
                 # we turn level numbers back into strings if possible
-                if isinstance(value,int) and value in logging._levelNames:
-                    value = logging._levelNames[value]
-
-            self.stream.write("%s = %s\n" % (option, value))
+                if isinstance(value, int):
+                    try:
+                        try:
+                            # python 3 support
+                            value = logging._levelNames[value]
+                        except AttributeError:
+                            value = logging._levelToName[value]
+                    except KeyError:
+                        pass
+            self.stream.write(u"%s = %s\n" % (option, value))
 
 # vim:et:ts=4:sts=4:ai

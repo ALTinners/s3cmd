@@ -26,6 +26,7 @@ from .Utils import getTreeFromXml, appendXmlTextNode, getDictFromTree, dateS3toP
 from .Crypto import sign_string_v2
 from .S3Uri import S3Uri, S3UriS3
 from .ConnMan import ConnMan
+from .SortedDict import SortedDict
 
 cloudfront_api_version = "2010-11-01"
 cloudfront_resource = "/%(api_ver)s/distribution" % { 'api_ver' : cloudfront_api_version }
@@ -286,7 +287,6 @@ class InvalidationBatch(object):
 
     def __str__(self):
         tree = ET.Element("InvalidationBatch")
-        s3 = S3(Config())
 
         for path in self.paths:
             if len(path) < 1 or path[0] != "/":
@@ -398,7 +398,7 @@ class CloudFront(object):
                     break
                 warning("Still waiting...")
                 time.sleep(10)
-        headers = {}
+        headers = SortedDict(ignore_case = True)
         headers['if-match'] = response['headers']['etag']
         response = self.send_request("DeleteDist", dist_id = cfuri.dist_id(),
                                      headers = headers)
@@ -425,7 +425,7 @@ class CloudFront(object):
         debug("SetDistConfig(): Etag = %s" % etag)
         request_body = str(dist_config)
         debug("SetDistConfig(): request_body: %s" % request_body)
-        headers = {}
+        headers = SortedDict(ignore_case = True)
         headers['if-match'] = etag
         response = self.send_request("SetDistConfig", dist_id = cfuri.dist_id(),
                                      body = request_body, headers = headers)
@@ -453,9 +453,8 @@ class CloudFront(object):
         if len(paths) > 999:
             try:
                 tmp_filename = Utils.mktmpfile()
-                f = open(deunicodise(tmp_filename), "w")
-                f.write(deunicodise("\n".join(paths)+"\n"))
-                f.close()
+                with open(deunicodise(tmp_filename), "w") as fp:
+                    fp.write(deunicodise("\n".join(paths)+"\n"))
                 warning("Request to invalidate %d paths (max 999 supported)" % len(paths))
                 warning("All the paths are now saved in: %s" % tmp_filename)
             except:
@@ -500,7 +499,7 @@ class CloudFront(object):
 
     def send_request(self, op_name, dist_id = None, request_id = None, body = None, headers = None, retries = _max_retries):
         if headers is None:
-            headers = {}
+            headers = SortedDict(ignore_case = True)
         operation = self.operations[op_name]
         if body:
             headers['content-type'] = 'text/plain'
@@ -539,7 +538,7 @@ class CloudFront(object):
                    operation['resource'] % { 'dist_id' : dist_id, 'request_id' : request_id })
 
         if not headers:
-            headers = {}
+            headers = SortedDict(ignore_case = True)
 
         if "date" in headers:
             if "x-amz-date" not in headers:
@@ -578,9 +577,9 @@ class CloudFront(object):
         return (self._max_retries - retries + 1) * 3
 
     def get_dist_name_for_bucket(self, uri):
-        if (uri.type == "cf"):
-            return uri
-        if (uri.type != "s3"):
+        if uri.type == "cf":
+            return [uri]
+        if uri.type != "s3":
             raise ParameterError("CloudFront or S3 URI required instead of: %s" % uri)
 
         debug("_get_dist_name_for_bucket(%r)" % uri)
