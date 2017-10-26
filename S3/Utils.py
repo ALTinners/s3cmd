@@ -255,14 +255,13 @@ __all__.append("mktmpfile")
 
 def hash_file_md5(filename):
     h = md5()
-    f = open(deunicodise(filename), "rb")
-    while True:
-        # Hash 32kB chunks
-        data = f.read(32*1024)
-        if not data:
-            break
-        h.update(data)
-    f.close()
+    with open(deunicodise(filename), "rb") as fp:
+        while True:
+            # Hash 32kB chunks
+            data = fp.read(32*1024)
+            if not data:
+                break
+            h.update(data)
     return h.hexdigest()
 __all__.append("hash_file_md5")
 
@@ -520,7 +519,7 @@ def getBucketFromHostname(hostname):
         return (hostname, False)
 
     # Create RE pattern from Config.host_bucket
-    pattern = S3.Config.Config().host_bucket % { 'bucket' : '(?P<bucket>.*)' }
+    pattern = S3.Config.Config().host_bucket.lower() % { 'bucket' : '(?P<bucket>.*)' }
     m = re.match(pattern, hostname, re.UNICODE)
     if not m:
         return (hostname, False)
@@ -528,7 +527,7 @@ def getBucketFromHostname(hostname):
 __all__.append("getBucketFromHostname")
 
 def getHostnameFromBucket(bucket):
-    return S3.Config.Config().host_bucket % { 'bucket' : bucket }
+    return S3.Config.Config().host_bucket.lower() % { 'bucket' : bucket }
 __all__.append("getHostnameFromBucket")
 
 
@@ -545,8 +544,6 @@ def calculateChecksum(buffer, mfile, offset, chunk_size, send_chunk):
         md5_hash.update(buffer)
 
     return md5_hash.hexdigest()
-
-
 __all__.append("calculateChecksum")
 
 

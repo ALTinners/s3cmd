@@ -1,6 +1,7 @@
 from __future__ import absolute_import, print_function
 
 import os
+import sys
 import http.client as httplib
 
 from http.client import (_CS_REQ_SENT, _CS_REQ_STARTED, CONTINUE, UnknownProtocol,
@@ -9,6 +10,8 @@ from http.client import (_CS_REQ_SENT, _CS_REQ_STARTED, CONTINUE, UnknownProtoco
 
 
 from io import StringIO
+
+from .Utils import encode_to_s3
 
 
 _METHODS_EXPECTING_BODY = ['PATCH', 'POST', 'PUT']
@@ -23,14 +26,18 @@ def _encode(data, name='data'):
     try:
         return data.encode("latin-1")
     except UnicodeEncodeError as err:
-        raise UnicodeEncodeError(
+        # The following is equivalent to raise Exception() from None
+        # but is still byte-compilable compatible with python 2.
+        exc = UnicodeEncodeError(
             err.encoding,
             err.object,
             err.start,
             err.end,
             "%s (%.20r) is not valid Latin-1. Use %s.encode('utf-8') "
             "if you want to send it encoded in UTF-8." %
-            (name.title(), data[err.start:err.end], name)) from None
+            (name.title(), data[err.start:err.end], name))
+        exc.__cause__ = None
+        raise exc
 
 def httpresponse_patched_begin(self):
     """ Re-implemented httplib begin function
@@ -157,7 +164,6 @@ def httpconnection_patched_send_request(self, method, url, body, headers,
     # 1. content-length has not been explicitly set
     # 2. the body is a file or iterable, but not a str or bytes-like
     # 3. Transfer-Encoding has NOT been explicitly set by the caller
-
     if 'content-length' not in header_names:
         # only chunk body if not explicitly set for backwards
         # compatibility, assuming the client code is already handling the
@@ -179,7 +185,7 @@ def httpconnection_patched_send_request(self, method, url, body, headers,
         encode_chunked = False
 
     for hdr, value in headers.items():
-        self.putheader(hdr, value)
+        self.putheader(encode_to_s3(hdr), encode_to_s3(value))
 
     if isinstance(body, str):
         # RFC 2616 Section 3.7.1 says that text default has a
@@ -204,7 +210,7 @@ def httpconnection_patched_send_request(self, method, url, body, headers,
         elif resp.status == CONTINUE:
             self.wrapper_send_body(body, encode_chunked)
 
-def httpconnection_patched_endheaders(self, message_body=None, *, encode_chunked=False):
+def httpconnection_patched_endheaders(self, message_body=None, encode_chunked=False):
     """REIMPLEMENTED because new argument encode_chunked added after py 3.4"""
     """Indicate that the last header line has been sent to the server.
 

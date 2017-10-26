@@ -69,7 +69,7 @@ def sign_string_v2(string_to_sign):
     return signature
 __all__.append("sign_string_v2")
 
-def sign_request_v2(method='GET', canonical_uri='/', params=None, cur_headers={}):
+def sign_request_v2(method='GET', canonical_uri='/', params=None, cur_headers=None):
     """Sign a string with the secret key, returning base64 encoded results.
     By default the configured secret key is used, but may be overridden as
     an argument.
@@ -85,6 +85,9 @@ def sign_request_v2(method='GET', canonical_uri='/', params=None, cur_headers={}
                                'versions', 'website',
                                # Missing of aws s3 doc but needed
                                'delete', 'cors']
+
+    if cur_headers is None:
+        cur_headers = SortedDict(ignore_case = True)
 
     access_key = Config.Config().access_key
 
@@ -111,7 +114,7 @@ def sign_request_v2(method='GET', canonical_uri='/', params=None, cur_headers={}
     debug("SignHeaders: " + repr(string_to_sign))
     signature = decode_from_s3(sign_string_v2(encode_to_s3(string_to_sign)))
 
-    new_headers = dict(list(cur_headers.items()))
+    new_headers = SortedDict(list(cur_headers.items()), ignore_case=True)
     new_headers["Authorization"] = "AWS " + access_key + ":" + signature
 
     return new_headers
@@ -140,6 +143,9 @@ def sign_url_base_v2(**parms):
     parms['access_key']=Config.Config().access_key
     parms['host_base']=Config.Config().host_base
     parms['object'] = s3_quote(parms['object'], quote_backslashes=False, unicode_output=True)
+    parms['proto'] = 'http'
+    if Config.Config().signurl_use_https:
+        parms['proto'] = 'https'
     debug("Expiry interpreted as epoch time %s", parms['expiry'])
     signtext = 'GET\n\n\n%(expiry)d\n/%(bucket)s/%(object)s' % parms
     param_separator = '?'
@@ -152,7 +158,7 @@ def sign_url_base_v2(**parms):
     debug("Signing plaintext: %r", signtext)
     parms['sig'] = s3_quote(sign_string_v2(encode_to_s3(signtext)), unicode_output=True)
     debug("Urlencoded signature: %s", parms['sig'])
-    url = "http://%(bucket)s.%(host_base)s/%(object)s?AWSAccessKeyId=%(access_key)s&Expires=%(expiry)d&Signature=%(sig)s" % parms
+    url = "%(proto)s://%(bucket)s.%(host_base)s/%(object)s?AWSAccessKeyId=%(access_key)s&Expires=%(expiry)d&Signature=%(sig)s" % parms
     if content_disposition is not None:
         url += "&response-content-disposition=" + s3_quote(content_disposition, unicode_output=True)
     if content_type is not None:
@@ -174,8 +180,10 @@ def getSignatureKey(key, dateStamp, regionName, serviceName):
     return kSigning
 
 def sign_request_v4(method='GET', host='', canonical_uri='/', params=None,
-                    region='us-east-1', cur_headers={}, body=b''):
+                    region='us-east-1', cur_headers=None, body=b''):
     service = 's3'
+    if cur_headers is None:
+        cur_headers = SortedDict(ignore_case = True)
 
     cfg = Config.Config()
     access_key = cfg.access_key
@@ -207,7 +215,7 @@ def sign_request_v4(method='GET', host='', canonical_uri='/', params=None,
         # avoid duplicate headers and previous Authorization
         if header == 'Authorization' or header in signed_headers.split(';'):
             continue
-        canonical_headers[header.strip()] = str(cur_headers[header]).strip()
+        canonical_headers[header.strip()] = cur_headers[header].strip()
         signed_headers += ';' + header.strip()
 
     # sort headers into a string

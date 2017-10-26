@@ -41,7 +41,7 @@ from .Config import Config
 from .Exceptions import *
 from .MultiPart import MultiPartUpload
 from .S3Uri import S3Uri
-from .ConnMan import ConnMan, CertificateError
+from .ConnMan import ConnMan
 from .Crypto import (sign_request_v2, sign_request_v4, checksum_sha256_file,
                     checksum_sha256_buffer, s3_quote, format_param_str)
 
@@ -88,7 +88,7 @@ try:
         def mime_magic_file(file):
             return magic_.file(deunicodise(file))
 
-except ImportError as e:
+except (ImportError, OSError) as e:
     error_str = str(e)
     if 'magic' in error_str:
         magic_message = "Module python-magic is not available."
@@ -270,12 +270,12 @@ class S3(object):
         elif bucket and check_bucket_name_dns_support(self.config.host_bucket, bucket):
             host = getHostnameFromBucket(bucket)
         else:
-            host = self.config.host_base
+            host = self.config.host_base.lower()
         debug('get_hostname(%s): %s' % (bucket, host))
         return host
 
     def set_hostname(self, bucket, redir_hostname):
-        S3Request.redir_map[bucket] = redir_hostname
+        S3Request.redir_map[bucket] = redir_hostname.lower()
 
     def format_uri(self, resource, base_path=None):
         bucket_name = resource.get('bucket')
@@ -328,6 +328,9 @@ class S3(object):
         def _get_common_prefixes(data):
             return getListFromXml(data, "CommonPrefixes")
 
+        def _get_next_marker(data, current_list):
+            return getTextFromXml(response["data"], "NextMarker") or current_list[-1]["Key"]
+
         uri_params = uri_params and uri_params.copy() or {}
         truncated = True
         prefixes = []
@@ -347,7 +350,7 @@ class S3(object):
             if truncated:
                 if limit == -1 or num_objects + num_prefixes < limit:
                     if current_list:
-                        uri_params['marker'] = current_list[-1]["Key"]
+                        uri_params['marker'] = _get_next_marker(response["data"], current_list)
                     else:
                         uri_params['marker'] = current_prefixes[-1]["Prefix"]
                     debug("Listing continues after '%s'" % uri_params['marker'])
@@ -740,8 +743,8 @@ class S3(object):
             raise ValueError("Key list is empty")
         bucket = S3Uri(batch[0]).bucket()
         request_body = compose_batch_del_xml(bucket, batch)
-        headers = {'content-md5': compute_content_md5(request_body),
-                   'content-type': 'application/xml'}
+        headers = SortedDict({'content-md5': compute_content_md5(request_body),
+                   'content-type': 'application/xml'}, ignore_case=True)
         request = self.create_request("BATCH_DELETE", bucket = bucket,
                                       headers = headers, body = request_body,
                                       uri_params = {'delete': None})
@@ -944,7 +947,7 @@ class S3(object):
         body = u"%s"% acl
         debug(u"set_acl(%s): acl-xml: %s" % (uri, body))
 
-        headers = {'content-type': 'application/xml'}
+        headers = SortedDict({'content-type': 'application/xml'}, ignore_case = True)
         if uri.has_object():
             request = self.create_request("OBJECT_PUT", uri = uri,
                                           headers = headers, body = body,
@@ -964,7 +967,7 @@ class S3(object):
         return response['data']
 
     def set_policy(self, uri, policy):
-        headers = {}
+        headers = SortedDict(ignore_case = True)
         # TODO check policy is proper json string
         headers['content-type'] = 'application/json'
         request = self.create_request("BUCKET_CREATE", uri = uri,
@@ -987,7 +990,7 @@ class S3(object):
         return response['data']
 
     def set_cors(self, uri, cors):
-        headers = {}
+        headers = SortedDict(ignore_case = True)
         # TODO check cors is proper json string
         headers['content-type'] = 'application/xml'
         headers['content-md5'] = compute_content_md5(cors)
@@ -1015,7 +1018,7 @@ class S3(object):
         return response
 
     def set_payer(self, uri):
-        headers = {}
+        headers = SortedDict(ignore_case = True)
         headers['content-type'] = 'application/xml'
         body = '<RequestPaymentConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">\n'
         if self.config.requester_pays:
@@ -1367,7 +1370,7 @@ class S3(object):
             conn = ConnMan.get(self.get_hostname(resource['bucket']))
             conn.c.putrequest(method_string, self.format_uri(resource, conn.path))
             for header in headers.keys():
-                conn.c.putheader(header, str(headers[header]))
+                conn.c.putheader(encode_to_s3(header), encode_to_s3(headers[header]))
             conn.c.endheaders()
         except ParameterError as e:
             raise
@@ -1540,7 +1543,7 @@ class S3(object):
         debug("MD5 sums: computed=%s, received=%s" % (md5_computed, response["headers"].get('etag', '').strip('"\'')))
         ## when using KMS encryption, MD5 etag value will not match
         md5_from_s3 = response["headers"].get("etag", "").strip('"\'')
-        if (md5_from_s3 != md5_hash.hexdigest()) and response["headers"].get("x-amz-server-side-encryption") != 'aws:kms':
+        if ('-' not in md5_from_s3) and (md5_from_s3 != md5_hash.hexdigest()) and response["headers"].get("x-amz-server-side-encryption") != 'aws:kms':
             warning("MD5 Sums don't match!")
             if retries:
                 warning("Retrying upload of %s" % (filename))
@@ -1600,7 +1603,7 @@ class S3(object):
         try:
             conn.c.putrequest(method_string, self.format_uri(resource, conn.path))
             for header in headers.keys():
-                conn.c.putheader(header, str(headers[header]))
+                conn.c.putheader(encode_to_s3(header), encode_to_s3(headers[header]))
             if start_position > 0:
                 debug("Requesting Range: %d .. end" % start_position)
                 conn.c.putheader("Range", "bytes=%d-" % start_position)

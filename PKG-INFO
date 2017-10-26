@@ -1,11 +1,12 @@
 Metadata-Version: 1.1
 Name: s3cmd
-Version: 2.0.0
+Version: 2.0.1
 Summary: Command line tool for managing Amazon S3 and CloudFront services
 Home-page: http://s3tools.org
 Author: github.com/mdomsch, github.com/matteobar, github.com/fviard
 Author-email: s3tools-bugs@lists.sourceforge.net
 License: GNU GPL v2+
+Description-Content-Type: UNKNOWN
 Description: 
         
         S3cmd lets you copy files from/to Amazon S3
