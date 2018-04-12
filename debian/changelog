@@ -1,10 +1,13 @@
-s3cmd (2.0.1-2) UNRELEASED; urgency=medium
+s3cmd (2.0.1-2) unstable; urgency=medium
 
   [ Nishanth Aravamudan <nish.aravamudan@canonical.com> ]
   * d/control: add run-time dependency on python3-distutils.
     - Upstream has required it in s3cmd since 2007.
     - LP: #1763398
     - Closes: #895560
+
+  [ Gianfranco Costamagna ]
+  * Bump std-version to 4.1.4, no changes required.
 
  -- Gianfranco Costamagna <locutusofborg@debian.org>  Thu, 12 Apr 2018 19:09:38 +0200
 
