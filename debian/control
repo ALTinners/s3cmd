@@ -16,7 +16,7 @@ Homepage: http://s3tools.org/s3cmd
 
 Package: s3cmd
 Architecture: all
-Depends: ${misc:Depends}, ${python3:Depends}, python3-distutils
+Depends: ${misc:Depends}, ${python3:Depends}
 Description: command-line Amazon S3 client
  Command-line tool to upload, retrieve and manage data in Amazon S3 service
  (http://www.amazon.com/s3/), designed for use in scripts. Features:

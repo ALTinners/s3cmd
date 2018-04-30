@@ -1,3 +1,10 @@
+s3cmd (2.0.1-3) unstable; urgency=medium
+
+  * Team upload
+  * Avoid the use of distutils at runtime. (Closes: #895560)
+
+ -- Matthias Klose <doko@debian.org>  Mon, 30 Apr 2018 07:31:16 +0200
+
 s3cmd (2.0.1-2) unstable; urgency=medium
 
   [ Nishanth Aravamudan <nish.aravamudan@canonical.com> ]
