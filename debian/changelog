@@ -1,3 +1,16 @@
+s3cmd (2.0.2-1) unstable; urgency=medium
+
+  * New upstream version 2.0.2
+  * Drop patches, upstream
+  * Bump std-version to 4.1.5, no changes required
+  * Switch vcs fields to salsa.d.o
+  * Switch repo to secure mode
+  * Closes: #885914. maybe this is not really fixed upstream,
+    but workarounds are shown in upstream ticket.
+    https://github.com/s3tools/s3cmd/issues/945
+
+ -- Gianfranco Costamagna <locutusofborg@debian.org>  Thu, 19 Jul 2018 12:57:44 +0200
+
 s3cmd (2.0.1-3) unstable; urgency=medium
 
   * Team upload
