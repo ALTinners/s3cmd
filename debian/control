@@ -10,8 +10,8 @@ Build-Depends: debhelper (>= 10),
                python3-magic,
                python3-setuptools
 Standards-Version: 4.1.5
-Vcs-Git: https://anonscm.debian.org/git/collab-maint/s3cmd.git
-Vcs-Browser: https://anonscm.debian.org/cgit/collab-maint/s3cmd.git
+Vcs-Git: https://salsa.debian.org/debian/s3cmd.git
+Vcs-Browser: https://salsa.debian.org/debian/s3cmd
 Homepage: http://s3tools.org/s3cmd
 
 Package: s3cmd
