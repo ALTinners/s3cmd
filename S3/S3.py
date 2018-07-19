@@ -17,6 +17,7 @@ import mimetypes
 import io
 import pprint
 from xml.sax import saxutils
+from socket import timeout as SocketTimeoutException
 from logging import debug, info, warning, error
 from stat import ST_SIZE
 try:
@@ -581,7 +582,7 @@ class S3(object):
 
     def stdin_content_type(self):
         content_type = self.config.mime_type
-        if content_type == '':
+        if not content_type:
             content_type = self.config.default_mime_type
 
         content_type += "; charset=" + self.config.encoding.upper()
@@ -788,6 +789,7 @@ class S3(object):
             'x-amz-delete-marker',
             # other headers returned from object_info() we don't want to send
             'accept-ranges',
+            'connection',
             'etag',
             'server',
             'x-amz-id-2',
@@ -919,7 +921,9 @@ class S3(object):
         debug("Object %s copied to %s" % (src_uri, dst_uri))
         if not response_copy["data"] or getRootTagName(response_copy["data"]) == "CopyObjectResult":
             self.object_delete(src_uri)
-            debug("Object %s deleted" % src_uri)
+            debug("Object '%s' deleted", src_uri)
+        else:
+            debug("Object '%s' NOT deleted because of an unexepected response data content.", src_uri)
         return response_copy
 
     def object_info(self, uri):
@@ -1168,6 +1172,9 @@ class S3(object):
         raise S3Error(response)
 
     def _http_400_handler(self, request, response, fn, *args, **kwargs):
+        """
+        Returns None if no handler available for the specific error code
+        """
         # AWS response AuthorizationHeaderMalformed means we sent the request to the wrong region
         # get the right region out of the response and send it there.
         if 'data' in response and len(response['data']) > 0:
@@ -1204,7 +1211,7 @@ class S3(object):
                 self.fallback_to_signature_v2 = True
                 return fn(*args, **kwargs)
 
-        raise S3Error(response)
+        return None
 
     def _http_403_handler(self, request, response, fn, *args, **kwargs):
         if 'data' in response and len(response['data']) > 0:
@@ -1246,8 +1253,9 @@ class S3(object):
         response = {}
         debug("Processing request, please wait...")
 
-        conn = ConnMan.get(self.get_hostname(resource['bucket']))
+        conn = None
         try:
+            conn = ConnMan.get(self.get_hostname(resource['bucket']))
             # TODO: Check what was supposed to be the usage of conn.path here
             # Currently this is always "None" all the time as not defined in ConnMan
             uri = self.format_uri(resource, conn.path)
@@ -1264,11 +1272,19 @@ class S3(object):
             ConnMan.put(conn)
         except (IOError, Exception) as e:
             debug("Response:\n" + pprint.pformat(response))
-            if hasattr(e, 'errno') and e.errno not in (errno.EPIPE, errno.ECONNRESET):
+            if ((hasattr(e, 'errno') and e.errno
+                 and e.errno not in (errno.EPIPE, errno.ECONNRESET, errno.ETIMEDOUT))
+                or "[Errno 104]" in str(e)
+                or "[Errno 32]" in str(e)
+               ) and not isinstance(e, SocketTimeoutException):
                 raise
-            # close the connection and re-establish
-            conn.counter = ConnMan.conn_max_counter
-            ConnMan.put(conn)
+            # When the connection is broken, BadStatusLine is raised with py2
+            # and RemoteDisconnected is raised by py3 with a trap:
+            # RemoteDisconnected has an errno field with a None value.
+            if conn:
+                # close the connection and re-establish
+                conn.counter = ConnMan.conn_max_counter
+                ConnMan.put(conn)
             if retries:
                 warning("Retrying failed request: %s (%s)" % (resource['uri'], e))
                 warning("Waiting %d sec..." % self._fail_wait(retries))
@@ -1289,7 +1305,18 @@ class S3(object):
             return self._http_redirection_handler(request, response, self.send_request, request)
 
         if response["status"] == 400:
-            return self._http_400_handler(request, response, self.send_request, request)
+            handler_fn = self._http_400_handler(request, response, self.send_request, request)
+            if handler_fn:
+                return handler_fn
+            err = S3Error(response)
+            if retries and err.code in ['BadDigest', 'OperationAborted',
+                                        'TokenRefreshRequired', 'RequestTimeout']:
+                warning(u"Retrying failed request: %s (%s)" % (resource['uri'], err))
+                warning("Waiting %d sec..." % self._fail_wait(retries))
+                time.sleep(self._fail_wait(retries))
+                return self.send_request(request, retries - 1)
+            raise err
+
         if response["status"] == 403:
             return self._http_403_handler(request, response, self.send_request, request)
         if response["status"] == 405: # Method Not Allowed.  Don't retry.
@@ -1407,6 +1434,7 @@ class S3(object):
                     # CONTINUE case. Reset the response
                     http_response.read()
                     conn.c._HTTPConnection__state = ConnMan._CS_REQ_SENT
+
                 while (size_left > 0):
                     #debug("SendFile: Reading up to %d bytes from '%s' - remaining bytes: %s" % (self.config.send_chunk, filename, size_left))
                     l = min(self.config.send_chunk, size_left)
@@ -1419,20 +1447,22 @@ class S3(object):
                         start_time = time.time()
 
                     md5_hash.update(data)
+
                     conn.c.wrapper_send_body(data)
                     if self.config.progress_meter:
                         progress.update(delta_position = len(data))
                     size_left -= len(data)
 
                     #throttle
+                    limitrate_throttle = throttle
                     if self.config.limitrate > 0:
                         real_duration = time.time() - start_time
-                        expected_duration = float(l)/self.config.limitrate
-                        throttle = max(expected_duration - real_duration, throttle)
-                    if throttle:
-                        time.sleep(throttle)
-                md5_computed = md5_hash.hexdigest()
+                        expected_duration = float(l) / self.config.limitrate
+                        limitrate_throttle = max(expected_duration - real_duration, limitrate_throttle)
+                    if limitrate_throttle:
+                        time.sleep(min(limitrate_throttle, self.config.throttle_max))
 
+                md5_computed = md5_hash.hexdigest()
                 http_response = conn.c.getresponse()
 
             response = {}
@@ -1449,11 +1479,11 @@ class S3(object):
             if self.config.progress_meter:
                 progress.done("failed")
             if retries:
-                if retries < self._max_retries:
-                    throttle = throttle and throttle * 5 or 0.01
                 known_error = False
-                if ((hasattr(e, 'errno') and e.errno not in (errno.EPIPE, errno.ECONNRESET))
-                   or "[Errno 104]" in str(e) or "[Errno 32]" in str(e)):
+                if ((hasattr(e, 'errno') and e.errno
+                     and e.errno not in (errno.EPIPE, errno.ECONNRESET, errno.ETIMEDOUT))
+                    or "[Errno 104]" in str(e) or "[Errno 32]" in str(e)
+                   ) and not isinstance(e, SocketTimeoutException):
                     # We have to detect these errors by looking at the error string
                     # Connection reset by peer and Broken pipe
                     # The server broke the connection early with an error like
@@ -1471,7 +1501,6 @@ class S3(object):
                         error("Cannot retrieve any response status before encountering an EPIPE or ECONNRESET exception")
                 if not known_error:
                     warning("Upload failed: %s (%s)" % (resource['uri'], e))
-                    warning("Retrying on lower speed (throttle=%0.2f)" % throttle)
                     warning("Waiting %d sec..." % self._fail_wait(retries))
                     time.sleep(self._fail_wait(retries))
                     # Connection error -> same throttle value
@@ -1498,8 +1527,16 @@ class S3(object):
                                                   self.send_file, request, stream, labels, buffer, offset = offset, chunk_size = chunk_size, use_expect_continue = use_expect_continue)
 
         if response["status"] == 400:
-            return self._http_400_handler(request, response,
-                                          self.send_file, request, stream, labels, buffer, offset = offset, chunk_size = chunk_size, use_expect_continue = use_expect_continue)
+            handler_fn = self._http_400_handler(request, response,
+                                                self.send_file, request, stream, labels, buffer, offset = offset, chunk_size = chunk_size, use_expect_continue = use_expect_continue)
+            if handler_fn:
+                return handler_fn
+            err = S3Error(response)
+            if err.code not in ['BadDigest', 'OperationAborted',
+                                'TokenRefreshRequired', 'RequestTimeout']:
+                raise err
+            # else the error will be handled later with a retry
+
         if response["status"] == 403:
             return self._http_403_handler(request, response,
                                           self.send_file, request, stream, labels, buffer, offset = offset, chunk_size = chunk_size, use_expect_continue = use_expect_continue)
@@ -1520,15 +1557,20 @@ class S3(object):
             if response["status"] >= 500:
                 ## AWS internal error - retry
                 try_retry = True
+                if response["status"] == 503:
+                    ## SlowDown error
+                    throttle = throttle and throttle * 5 or 0.01
             elif response["status"] >= 400:
                 err = S3Error(response)
                 ## Retriable client error?
-                if err.code in [ 'BadDigest', 'OperationAborted', 'TokenRefreshRequired', 'RequestTimeout' ]:
+                if err.code in ['BadDigest', 'OperationAborted', 'TokenRefreshRequired', 'RequestTimeout']:
                     try_retry = True
 
             if try_retry:
                 if retries:
                     warning("Upload failed: %s (%s)" % (resource['uri'], S3Error(response)))
+                    if throttle:
+                        warning("Retrying on lower speed (throttle=%0.2f)" % throttle)
                     warning("Waiting %d sec..." % self._fail_wait(retries))
                     time.sleep(self._fail_wait(retries))
                     return self.send_file(request, stream, labels, buffer, throttle,
@@ -1599,8 +1641,9 @@ class S3(object):
             info("Receiving file '%s', please wait..." % filename)
         timestamp_start = time.time()
 
-        conn = ConnMan.get(self.get_hostname(resource['bucket']))
+        conn = None
         try:
+            conn = ConnMan.get(self.get_hostname(resource['bucket']))
             conn.c.putrequest(method_string, self.format_uri(resource, conn.path))
             for header in headers.keys():
                 conn.c.putheader(encode_to_s3(header), encode_to_s3(headers[header]))
@@ -1624,11 +1667,15 @@ class S3(object):
         except (IOError, Exception) as e:
             if self.config.progress_meter:
                 progress.done("failed")
-            if hasattr(e, 'errno') and e.errno not in (errno.EPIPE, errno.ECONNRESET):
+            if ((hasattr(e, 'errno') and e.errno and
+                 e.errno not in (errno.EPIPE, errno.ECONNRESET, errno.ETIMEDOUT))
+                or "[Errno 104]" in str(e) or "[Errno 32]" in str(e)
+               ) and not isinstance(e, SocketTimeoutException):
                 raise
-            # close the connection and re-establish
-            conn.counter = ConnMan.conn_max_counter
-            ConnMan.put(conn)
+            if conn:
+                # close the connection and re-establish
+                conn.counter = ConnMan.conn_max_counter
+                ConnMan.put(conn)
 
             if retries:
                 warning("Retrying failed request: %s (%s)" % (resource['uri'], e))
@@ -1648,8 +1695,11 @@ class S3(object):
 
         if response["status"] == 400:
             response['data'] = http_response.read()
-            return self._http_400_handler(request, response, self.recv_file,
-                                          request, stream, labels, start_position)
+            handler_fn = self._http_400_handler(request, response, self.recv_file,
+                                                request, stream, labels, start_position)
+            if handler_fn:
+                return handler_fn
+            raise S3Error(response)
 
         if response["status"] == 403:
             response['data'] = http_response.read()
@@ -1713,7 +1763,10 @@ class S3(object):
         except (IOError, Exception) as e:
             if self.config.progress_meter:
                 progress.done("failed")
-            if hasattr(e, 'errno') and e.errno not in (errno.EPIPE, errno.ECONNRESET):
+            if ((hasattr(e, 'errno') and e.errno
+                 and e.errno not in (errno.EPIPE, errno.ECONNRESET, errno.ETIMEDOUT))
+                or "[Errno 104]" in str(e) or "[Errno 32]" in str(e)
+               ) and not isinstance(e, SocketTimeoutException):
                 raise
             # close the connection and re-establish
             conn.counter = ConnMan.conn_max_counter
