@@ -24,6 +24,12 @@ except ImportError:
     import http.client as httplib
 import locale
 
+try: 
+ from configparser import NoOptionError, NoSectionError, MissingSectionHeaderError, ConfigParser as PyConfigParser
+except ImportError:
+  # Python2 fallback code
+  from ConfigParser import NoOptionError, NoSectionError, MissingSectionHeaderError, ConfigParser as PyConfigParser
+
 try:
     unicode
 except NameError:
@@ -43,6 +49,38 @@ def config_unicodise(string, encoding = "utf-8", errors = "replace"):
         return unicode(string, encoding, errors)
     except UnicodeDecodeError:
         raise UnicodeDecodeError("Conversion to unicode failed: %r" % string)
+
+def is_bool_true(value):
+    """Check to see if a string is true, yes, on, or 1
+
+    value may be a str, or unicode.
+
+    Return True if it is
+    """
+    if type(value) == unicode:
+        return value.lower() in ["true", "yes", "on", "1"]
+    elif type(value) == bool and value == True:
+        return True
+    else:
+        return False
+
+def is_bool_false(value):
+    """Check to see if a string is false, no, off, or 0
+
+    value may be a str, or unicode.
+
+    Return True if it is
+    """
+    if type(value) == unicode:
+        return value.lower() in ["false", "no", "off", "0"]
+    elif type(value) == bool and value == False:
+        return True
+    else:
+        return False
+
+def is_bool(value):
+    """Check a string value to see if it is bool"""
+    return is_bool_true(value) or is_bool_false(value)
 
 class Config(object):
     _instance = None
@@ -72,7 +110,7 @@ class Config(object):
     enable = None
     get_continue = False
     put_continue = False
-    upload_id = None
+    upload_id = u""
     skip_existing = False
     recursive = False
     restore_days = 1
@@ -135,6 +173,8 @@ class Config(object):
     reduced_redundancy = False
     storage_class = u""
     follow_symlinks = False
+    # If too big, this value can be overriden by the OS socket timeouts max values.
+    # For example, on Linux, a connection attempt will automatically timeout after 120s.
     socket_timeout = 300
     invalidate_on_cf = False
     # joseprio: new flags for default index invalidation
@@ -155,13 +195,16 @@ class Config(object):
     limitrate = 0
     requester_pays = False
     stop_on_error = False
-    content_disposition = None
-    content_type = None
+    content_disposition = u""
+    content_type = u""
     stats = False
     # Disabled by default because can create a latency with a CONTINUE status reply
     # expected for every send file requests.
     use_http_expect = False
     signurl_use_https = False
+    # Maximum sleep duration for throtte / limitrate.
+    # s3 will timeout if a request/transfer is stuck for more than a short time
+    throttle_max = 100
 
     ## Creating a singleton
     def __new__(self, configfile = None, access_key=None, secret_key=None, access_token=None):
@@ -174,8 +217,8 @@ class Config(object):
             try:
                 self.read_config_file(configfile)
             except IOError:
-                if 'AWS_CREDENTIAL_FILE' in os.environ:
-                    self.env_config()
+                if 'AWS_CREDENTIAL_FILE' in os.environ or 'AWS_PROFILE' in os.environ:
+                    self.aws_credential_file()
 
             # override these if passed on the command-line
             if access_key and secret_key:
@@ -217,7 +260,7 @@ class Config(object):
             resp = conn.getresponse()
             files = resp.read()
             if resp.status == 200 and len(files)>1:
-                conn.request('GET', "/latest/meta-data/iam/security-credentials/%s"%files)
+                conn.request('GET', "/latest/meta-data/iam/security-credentials/%s"%files.decode('UTF-8'))
                 resp=conn.getresponse()
                 if resp.status == 200:
                     creds=json.load(resp)
@@ -238,38 +281,74 @@ class Config(object):
             except:
                 warning("Could not refresh role")
 
-    def env_config(self):
-        cred_content = ""
+    def aws_credential_file(self):
         try:
-            cred_file = open(os.environ['AWS_CREDENTIAL_FILE'],'r')
-            cred_content = cred_file.read()
-        except IOError as e:
-            debug("Error %d accessing credentials file %s" % (e.errno,os.environ['AWS_CREDENTIAL_FILE']))
-        r_data = re.compile("^\s*(?P<orig_key>\w+)\s*=\s*(?P<value>.*)")
-        r_quotes = re.compile("^\"(.*)\"\s*$")
-        if len(cred_content)>0:
-            for line in cred_content.splitlines():
-                is_data = r_data.match(line)
-                if is_data:
-                    data = is_data.groupdict()
-                    if r_quotes.match(data["value"]):
-                        data["value"] = data["value"][1:-1]
-                    if data["orig_key"] == "AWSAccessKeyId" \
-                       or data["orig_key"] == "aws_access_key_id":
-                        data["key"] = "access_key"
-                    elif data["orig_key"]=="AWSSecretKey" \
-                       or data["orig_key"]=="aws_secret_access_key":
-                        data["key"] = "secret_key"
-                    else:
-                        debug("env_config: key = %r will be ignored", data["orig_key"])
+            aws_credential_file = os.path.expanduser('~/.aws/credentials') 
+            if 'AWS_CREDENTIAL_FILE' in os.environ and os.path.isfile(os.environ['AWS_CREDENTIAL_FILE']):
+                aws_credential_file = config_unicodise(os.environ['AWS_CREDENTIAL_FILE'])
 
-                    if "key" in data:
-                        Config().update_option(data["key"], data["value"])
-                        if data["key"] in ("access_key", "secret_key", "gpg_passphrase"):
-                            print_value = ("%s...%d_chars...%s") % (data["value"][:2], len(data["value"]) - 3, data["value"][-1:])
-                        else:
-                            print_value = data["value"]
-                        debug("env_Config: %s->%s" % (data["key"], print_value))
+            config = PyConfigParser()
+
+            debug("Reading AWS credentials from %s" % (aws_credential_file))
+            try:
+                config.read(aws_credential_file)
+            except MissingSectionHeaderError:
+                # if header is missing, this could be deprecated credentials file format
+                # as described here: https://blog.csanchez.org/2011/05/
+                # then do the hacky-hack and add default header
+                # to be able to read the file with PyConfigParser() 
+                config_string = None
+                with open(aws_credential_file, 'r') as f:
+                    config_string = '[default]\n' + f.read()
+                config.read_string(config_string.decode('utf-8'))
+
+
+            profile = config_unicodise(os.environ.get('AWS_PROFILE', "default"))
+            debug("Using AWS profile '%s'" % (profile))
+
+            # get_key - helper function to read the aws profile credentials
+            # including the legacy ones as described here: https://blog.csanchez.org/2011/05/ 
+            def get_key(profile, key, legacy_key, print_warning=True):
+                result = None
+
+                try:
+                    result = config.get(profile, key)
+                except NoOptionError as e:
+                    if print_warning: # we may want to skip warning message for optional keys
+                        warning("Couldn't find key '%s' for the AWS Profile '%s' in the credentials file '%s'" % (e.option, e.section, aws_credential_file))
+                    if legacy_key: # if the legacy_key defined and original one wasn't found, try read the legacy_key
+                        try:
+                            key = legacy_key
+                            profile = "default"
+                            result = config.get(profile, key)
+                            warning(
+                                    "Legacy configuratin key '%s' used, " % (key) + 
+                                    "please use the standardized config format as described here: " +
+                                    "https://aws.amazon.com/blogs/security/a-new-and-standardized-way-to-manage-credentials-in-the-aws-sdks/"
+                                     )
+                        except NoOptionError as e:
+                            pass
+
+                if result:
+                    debug("Found the configuration option '%s' for the AWS Profile '%s' in the credentials file %s" % (key, profile, aws_credential_file)) 
+                return result
+
+            profile_access_key = get_key(profile, "aws_access_key_id", "AWSAccessKeyId") 
+            if profile_access_key:
+                Config().update_option('access_key', config_unicodise(profile_access_key))
+
+            profile_secret_key = get_key(profile, "aws_secret_access_key", "AWSSecretKey") 
+            if profile_secret_key:
+                Config().update_option('secret_key', config_unicodise(profile_secret_key))
+
+            profile_access_token = get_key(profile, "aws_session_token", None, False) 
+            if profile_access_token:
+                Config().update_option('access_token', config_unicodise(profile_access_token))
+
+        except IOError as e:
+            warning("%d accessing credentials file %s" % (e.errno, aws_credential_file))
+        except NoSectionError as e:
+            warning("Couldn't find AWS Profile '%s' in the credentials file '%s'" % (profile, aws_credential_file))
 
     def option_list(self):
         retval = []
@@ -347,10 +426,12 @@ class Config(object):
                 raise ValueError("Config: value of option %s must have suffix m, k, or nothing, not '%s'" % (option, value))
 
         ## allow yes/no, true/false, on/off and 1/0 for boolean options
-        elif type(getattr(Config, option)) is type(True):   # bool
-            if str(value).lower() in ("true", "yes", "on", "1"):
+        ## Some options default to None, if that's the case check the value to see if it is bool
+        elif (type(getattr(Config, option)) is type(True) or              # Config is bool
+             (getattr(Config, option) is None and is_bool(value))):  # Config is None and value is bool
+            if is_bool_true(value):
                 value = True
-            elif str(value).lower() in ("false", "no", "off", "0"):
+            elif is_bool_false(value):
                 value = False
             else:
                 raise ValueError("Config: value of option '%s' must be Yes or No, not '%s'" % (option, value))

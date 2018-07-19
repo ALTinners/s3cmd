@@ -1,6 +1,6 @@
 Metadata-Version: 1.1
 Name: s3cmd
-Version: 2.0.1
+Version: 2.0.2
 Summary: Command line tool for managing Amazon S3 and CloudFront services
 Home-page: http://s3tools.org
 Author: github.com/mdomsch, github.com/matteobar, github.com/fviard

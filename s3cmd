@@ -57,7 +57,12 @@ import tempfile
 from copy import copy
 from optparse import OptionParser, Option, OptionValueError, IndentedHelpFormatter
 from logging import debug, info, warning, error
-from distutils.spawn import find_executable
+
+try:
+    from shutil import which
+except ImportError:
+    # python2 fallback code
+    from distutils.spawn import find_executable as which
 
 from ssl import SSLError
 import io
@@ -1119,7 +1124,7 @@ def cmd_sync_remote2remote(args):
     total_size_copied += size
 
 
-    n_copied, bytes_saved, failed_copy_files = remote_copy(s3, copy_pairs, destination_base)
+    n_copied, bytes_saved, failed_copy_files = remote_copy(s3, copy_pairs, destination_base, None)
     total_files_copied += n_copied
     total_size_copied += bytes_saved
 
@@ -1344,7 +1349,7 @@ def cmd_sync_remote2local(args):
                     error(u"Download of '%s' failed (Reason: No space left)" % file)
                     allow_partial = False
                 else:
-                    error(u"Download of '%s' failed (Reason: Unknown OsError %d)" % (file, exc.errno))
+                    error(u"Download of '%s' failed (Reason: Unknown OsError %d)" % (file, exc.errno or 0))
                     allow_partial = False
 
                 try:
@@ -1527,7 +1532,7 @@ def local_copy(copy_pairs, destination_base):
             failed_copy_list[relative_file] = src_obj
     return len(copy_pairs), saved_bytes, failed_copy_list
 
-def remote_copy(s3, copy_pairs, destination_base):
+def remote_copy(s3, copy_pairs, destination_base, uploaded_objects_list=None):
     cfg = Config()
     saved_bytes = 0
     failed_copy_list = FileDict()
@@ -1540,6 +1545,8 @@ def remote_copy(s3, copy_pairs, destination_base):
             s3.object_copy(dst1_uri, dst2_uri, extra_headers)
             saved_bytes += src_obj.get(u'size', 0)
             output(u"remote copy: '%s' -> '%s'" % (dst1, dst2))
+            if uploaded_objects_list is not None:
+                uploaded_objects_list.append(dst2)
         except:
             warning(u"Unable to remote copy files '%s' -> '%s'" % (dst1_uri, dst2_uri))
             failed_copy_list[dst2] = src_obj
@@ -1770,7 +1777,12 @@ def cmd_sync_local2remote(args):
         status, n, size_transferred = _upload(update_list, n, upload_count, size_transferred)
         if ret == EX_OK:
             ret = status
-        n_copies, saved_bytes, failed_copy_files  = remote_copy(s3, copy_pairs, destination_base)
+        # uploaded_objects_list reference is passed so it can be filled with
+        # destination object of succcessful copies so that they can be
+        # invalidated by cf
+        n_copies, saved_bytes, failed_copy_files  = remote_copy(s3, copy_pairs,
+                                                                destination_base,
+                                                                uploaded_objects_list)
 
         #upload file that could not be copied
         debug("Process files that were not remote copied")
@@ -2267,7 +2279,7 @@ def run_configure(config_file, args):
         ]
     ## Option-specfic defaults
     if getattr(cfg, "gpg_command") == "":
-        setattr(cfg, "gpg_command", find_executable("gpg"))
+        setattr(cfg, "gpg_command", which("gpg"))
 
     if getattr(cfg, "proxy_host") == "" and os.getenv("http_proxy"):
         autodetected_encoding = locale.getpreferredencoding() or "UTF-8"
@@ -2654,7 +2666,7 @@ def main():
 
     optparser.add_option(      "--delete-removed", dest="delete_removed", action="store_true", help="Delete destination objects with no corresponding source file [sync]")
     optparser.add_option(      "--no-delete-removed", dest="delete_removed", action="store_false", help="Don't delete destination objects.")
-    optparser.add_option(      "--delete-after", dest="delete_after", action="store_true", help="Perform deletes after new uploads [sync]")
+    optparser.add_option(      "--delete-after", dest="delete_after", action="store_true", help="Perform deletes AFTER new uploads when delete-removed is enabled [sync]")
     optparser.add_option(      "--delay-updates", dest="delay_updates", action="store_true", help="*OBSOLETE* Put all updated files into place at end [sync]")  # OBSOLETE
     optparser.add_option(      "--max-delete", dest="max_delete", action="store", help="Do not delete more than NUM files. [del] and [sync]", metavar="NUM")
     optparser.add_option(      "--limit", dest="limit", action="store", help="Limit number of objects returned in the response body (only for [ls] and [la] commands)", metavar="NUM")
@@ -2868,7 +2880,7 @@ def main():
         raise ParameterError("Chunk size %d MB is too large, must be <= %d MB. Please adjust --multipart-chunk-size-mb" % (cfg.multipart_chunk_size_mb, MultiPartUpload.MAX_CHUNK_SIZE_MB))
 
     ## If an UploadId was provided, set put_continue True
-    if options.upload_id is not None:
+    if options.upload_id:
         cfg.upload_id = options.upload_id
         cfg.put_continue = True
 
@@ -3013,12 +3025,19 @@ def report_exception(e, msg=u''):
         try:
             s = u' '.join([unicodise(a) for a in sys.argv])
         except NameError:
-            s = u' '.join([(a) for a in sys.argv])
+            # Error happened before Utils module was yet imported to provide unicodise
+            try:
+                s = u' '.join([(a) for a in sys.argv])
+            except UnicodeDecodeError:
+                s = u'[encoding safe] ' + u' '.join([('%r'%a) for a in sys.argv])
         sys.stderr.write(u"Invoked as: %s\n" % s)
 
         e_class = str(e.__class__)
         e_class = e_class[e_class.rfind(".")+1 : -2]
-        sys.stderr.write(u"Problem: %s: %s\n" % (e_class, e))
+        try:
+            sys.stderr.write(u"Problem: %s: %s\n" % (e_class, e))
+        except UnicodeDecodeError:
+            sys.stderr.write(u"Problem: [encoding safe] %r: %r\n" % (e_class, e))
         try:
             sys.stderr.write(u"S3cmd:   %s\n" % PkgInfo.version)
         except NameError:
