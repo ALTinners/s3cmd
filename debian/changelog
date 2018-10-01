@@ -1,3 +1,9 @@
+s3cmd (2.0.2-2) UNRELEASED; urgency=medium
+
+  * d/changelog: Remove trailing whitespaces
+
+ -- Ondřej Nový <onovy@debian.org>  Mon, 01 Oct 2018 09:38:41 +0200
+
 s3cmd (2.0.2-1) unstable; urgency=medium
 
   * New upstream version 2.0.2
@@ -179,9 +185,9 @@ s3cmd (1.0.0-2) unstable; urgency=low
   * Drop pre-python-2.5 stanza from debian/control.
   * Update debian/copyright to version 1.0 of machine-readable format.
   * Post-Squeeze removal of s3cmd.preinst.
-  
+
  -- Mikhail Gusarov <dottedmag@debian.org>  Thu, 22 Mar 2012 23:04:45 +0100
-  
+
 s3cmd (1.0.0-1) unstable; urgency=low
 
   * New upstream release.
@@ -250,7 +256,7 @@ s3cmd (0.9.8.4-1) unstable; urgency=low
   [Sandro Tosi]
   * debian/control
     - switch Vcs-Browser field to viewsvn
-  
+
  -- Mikhail Gusarov <dottedmag@dottedmag.net>  Tue, 09 Dec 2008 01:56:19 +0600
 
 s3cmd (0.9.8.3-1) unstable; urgency=low
@@ -297,7 +303,7 @@ s3cmd (0.9.5-1) unstable; urgency=low
 
   * New upstream release
     - do-not-check-elementtree-at-build-time.patch refreshed.
-  
+
   * Homepage moved from description to debian/control field.
 
  -- Mikhail Gusarov <dottedmag@dottedmag.net>  Wed, 14 Nov 2007 03:04:49 +0600
